@@ -165,10 +165,11 @@ def run_theano_binary_asgd_speed():
                 kwargs['dtype'] = dtype
 
                 clf0 = NaiveBinaryASGD(N_FEATURES, rstate=copy(rstate), **kwargs)
-                clf1 = TheanoBinaryASGD(N_FEATURES, rstate=copy(rstate), **kwargs)
-
                 # pre-compiling (only happens twice anyway)
+                clf1 = TheanoBinaryASGD(N_FEATURES, rstate=copy(rstate), **kwargs)
                 clf1.partial_fit(X, y)
+                # now allocate the one we'll actually use
+                clf1 = TheanoBinaryASGD(N_FEATURES, rstate=copy(rstate), **kwargs)
 
                 t = time.time()
                 clf0.fit(X, y)
@@ -177,6 +178,9 @@ def run_theano_binary_asgd_speed():
                 t = time.time()
                 clf1.fit(X, y)
                 t1 = time.time() - t
+
+                assert clf0.n_observations == clf1.n_observations, (
+                    clf0.n_observations, clf1.n_observations )
                 print 'noise:%.3f  dtype:%s  N_FEAT:%06i  Naive:%.3f  Theano:%.3f' % (
                         noise_level, dtype, N_FEATURES, t0, t1)
 
