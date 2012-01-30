@@ -18,9 +18,26 @@ import theano
 import theano.ifelse
 import theano.tensor as tensor
 
+# -- SGD has low arithmetic density and the current implementation includes
+# many idxmaps and so on that involve integer-valued variables. It seems the
+# switch statement doens't get loop fusion on the GPU.
+#
+# In the future when Theano supports integers, reconsider allowing for GPU
+# use. For now, GPU is typically slower so it is disabled.
+#
+# This global variable is not meant to be modified by code, it must be changed
+# by hand here in the file source.
+allow_GPU = False
+
+if allow_GPU:
+    from theano import shared as shared_tensor
+else:
+    # -- force shared variables not to go on GPU
+    from theano.tensor.sharedvar import tensor_constructor as shared_tensor
+
 
 def vector_updates(
-        # symbolic args
+        # -- symbolic args
         obs,
         label,
         n_observations,
@@ -29,7 +46,7 @@ def vector_updates(
         sgd_bias,
         asgd_weights,
         asgd_bias,
-        # non-symbolic args
+        # -- non-symbolic args
         l2_regularization,
         sgd_step_size_scheduling_exponent,
         sgd_step_size_scheduling_multiplier,
@@ -92,7 +109,7 @@ def vector_updates(
     return updates, cost
 
 _fn_cache = {}
-# some vars could be a svar element rather than signature constant:
+# Some vars could be a svar element rather than signature constant:
 #  - step_size exponent
 #  - step_size_multiplier
 #  - l2_regularization
@@ -119,50 +136,51 @@ def get_fit_fn(
         pass
 
     svar = {}
-    svar['n_observations'] = theano.shared(
-                np.asarray(0).astype('int64'),
+    svar['n_observations'] = shared_tensor(
+                np.asarray(0, dtype='int64'),
                 name='n_observations',
                 allow_downcast=True)
 
-    svar['sgd_step_size0'] = theano.shared(
-                np.asarray(0).astype(dtype),
+    svar['sgd_step_size0'] = shared_tensor(
+                np.asarray(0, dtype=dtype),
                 name='sgd_step_size0',
                 allow_downcast=True)
 
-    svar['sgd_weights'] = theano.shared(
+    svar['sgd_weights'] = shared_tensor(
                 np.zeros(2, dtype=dtype),
                 name='sgd_weights',
                 allow_downcast=True)
 
-    svar['sgd_bias'] = theano.shared(
+    svar['sgd_bias'] = shared_tensor(
                 np.asarray(0, dtype=dtype),
                 name='sgd_bias')
 
-    svar['asgd_weights'] = theano.shared(
+    svar['asgd_weights'] = shared_tensor(
                 np.zeros(2, dtype=dtype),
                 name='asgd_weights')
 
-    svar['asgd_bias'] = theano.shared(
+    svar['asgd_bias'] = shared_tensor(
                 np.asarray(0, dtype=dtype),
                 name='asgd_bias')
 
-    svar['obs'] = obs = theano.shared(np.zeros((2, 2),
-            dtype=dtype),
+    svar['obs'] = obs = shared_tensor(
+            np.zeros((2, 2), dtype=dtype),
             allow_downcast=True,
             name='obs')
 
     # N.B. labels are float
-    svar['label'] = label = theano.shared(np.zeros(2, dtype=dtype),
+    svar['label'] = label = shared_tensor(
+            np.zeros(2, dtype=dtype),
             allow_downcast=True,
             name='label')
-    svar['idx'] = idx = theano.shared(
+    svar['idx'] = idx = shared_tensor(
             np.asarray(0, dtype='int64'),
             name='idx')
-    svar['idxmap'] = idxmap = theano.shared(
+    svar['idxmap'] = idxmap = shared_tensor(
             np.zeros(2, dtype='int64'),
             strict=True,
             name='idxmap')
-    svar['mean_cost'] = mean_cost = theano.shared(
+    svar['mean_cost'] = mean_cost = shared_tensor(
             np.asarray(0, dtype=dtype),
             name='mean_cost')
 
@@ -188,9 +206,12 @@ def get_fit_fn(
     # N.B. a VM-based linker is required for correctness of this code, because
     # the fit() and partial_fit() methods call the linker directly when they
     # are not profiling.
+    mode = theano.Mode(optimizer='fast_run', linker='cvm_nogc')
+    if not allow_GPU:
+        mode = mode.excluding('InputToGpuOptimizer')
     fn = theano.function([], [],
             updates=updates,
-            mode=theano.Mode(optimizer='fast_run', linker='cvm_nogc'),
+            mode=mode,
             )
 
     _fn_cache[signature] = (updates, cost, svar, fn)
