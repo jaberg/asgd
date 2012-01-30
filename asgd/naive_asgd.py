@@ -174,10 +174,10 @@ class NaiveBinaryASGD(BaseASGD, DetermineStepSizeMixin):
 
         # --
         self.sgd_weights = np.zeros((n_features), dtype=dtype)
-        self.sgd_bias = np.zeros((1), dtype=dtype)
+        self.sgd_bias = np.asarray(0, dtype=dtype)
 
         self.asgd_weights = np.zeros((n_features), dtype=dtype)
-        self.asgd_bias = np.zeros((1), dtype=dtype)
+        self.asgd_bias = np.asarray(0, dtype=dtype)
 
     def partial_fit(self, X, y):
 
