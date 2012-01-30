@@ -306,7 +306,7 @@ class TheanoBinaryASGD(NaiveBinaryASGD):
             if self.fit_converged():
                 break
 
-        for key in params:
+        for key in self._param_names:
             setattr(self, key, svar[key].get_value(borrow=False))
 
         return self
