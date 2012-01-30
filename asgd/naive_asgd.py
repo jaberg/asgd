@@ -75,6 +75,9 @@ class BaseASGD(object):
             self.sgd_step_size_scheduling_multiplier = \
                     sgd_step_size_scheduling_multiplier
 
+        BaseASGD.reset(self)
+
+    def reset(self):
         self.n_observations = 0
         self.asgd_step_size0 = 1
         self.asgd_step_size = self.asgd_step_size0
