@@ -185,9 +185,12 @@ def get_fit_fn(
     aa = tensor.cast(1.0 / (idx + 1), dtype)
     updates[mean_cost] = (1 - aa) * mean_cost + aa * cost
 
+    # N.B. a VM-based linker is required for correctness of this code, because
+    # the fit() and partial_fit() methods call the linker directly when they
+    # are not profiling.
     fn = theano.function([], [],
             updates=updates,
-            mode=theano.Mode( optimizer='fast_run', linker='cvm_nogc'),
+            mode=theano.Mode(optimizer='fast_run', linker='cvm_nogc'),
             )
 
     _fn_cache[signature] = (updates, cost, svar, fn)
@@ -198,38 +201,40 @@ def get_fit_fn(
 
 class TheanoBinaryASGD(NaiveBinaryASGD):
 
-    """
-    Notes regarding speed:
-    1. This could be sped up futher by implementing an sdot Op in e.g.
-       theano's blas_c.py file.  (currently _dot22 is used for inner product)
-
-    2. Algorithmically, http://www.dbs.ifi.lmu.de/~yu_k/cvpr11_0694.pdf
-    describes a change of variables that can potentially reduce the number of
-    updates required by the algorithm, but I think it returns the same
-    advantage as loop fusion / proper BLAS usage.
-    """
-
+    # use_switch = True means that all the computations associated with an
+    # incorrect margin update are performed for all training examples (even
+    # correct ones).
+    #
+    # use_switch = False uses the lazy ifelse to avoid duplicate computations
+    # but the resulting program typically runs more slowly.
     use_switch = True
-
-    def partial_fit(self, X, y):
-        updates, cost, svar, fn = get_fit_fn(
-                self.asgd_weights.dtype,
-                self.l2_regularization,
-                self.sgd_step_size_scheduling_exponent,
-                self.sgd_step_size_scheduling_multiplier,
-                self.use_switch)
-        n_points, n_features = X.shape
-        assert n_features == self.n_features
-        assert (n_points,) == y.shape
-        assert np.all(y ** 2 == 1)  # make sure labels are +-1
-
-        params = [
+    self._param_names = [
                 'sgd_weights',
                 'sgd_bias',
                 'asgd_weights',
                 'asgd_bias',
                 'n_observations',
                 'sgd_step_size0']
+
+    def _get_fit_fn(self):
+        return get_fit_fn(
+                self.asgd_weights.dtype,
+                self.l2_regularization,
+                self.sgd_step_size_scheduling_exponent,
+                self.sgd_step_size_scheduling_multiplier,
+                self.use_switch)
+
+    def _append_train_mean(self, mean_cost):
+        self.train_means.append(
+                mean_cost
+                + self.l2_regularization * (self.asgd_weights ** 2).sum())
+
+    def partial_fit(self, X, y):
+        updates, cost, svar, fn = self._get_fit_fn()
+        n_points, n_features = X.shape
+        assert n_features == self.n_features
+        assert (n_points,) == y.shape
+        assert np.all(y ** 2 == 1)  # make sure labels are +-1
 
         for key, val in [
                 ('obs', X),
@@ -239,7 +244,7 @@ class TheanoBinaryASGD(NaiveBinaryASGD):
                 ]:
             svar[key].set_value(val, borrow=True)
 
-        for key in params:
+        for key in self._param_names:
             svar[key].set_value(getattr(self, key), borrow=True)
 
         if fn.profile:
@@ -248,15 +253,12 @@ class TheanoBinaryASGD(NaiveBinaryASGD):
             fn_fn = fn.fn
             for i in xrange(n_points): fn_fn()
 
-        for key in params:
+        for key in self._param_names:
             setattr(self, key, svar[key].get_value(borrow=False))
 
-        self.train_means.append(
-                svar['mean_cost'].get_value()
-                + self.l2_regularization * (self.asgd_weights ** 2).sum())
+        self._append_train_mean(svar['mean_cost'].get_value())
 
         return self
-
 
     def fit(self, X, y):
 
@@ -276,20 +278,7 @@ class TheanoBinaryASGD(NaiveBinaryASGD):
         # XXX don't overlap with determine_sgd_step_size0 until the get_fit_fn
         # is reentrant.
         #
-        updates, cost, svar, fn = get_fit_fn(
-                self.asgd_weights.dtype,
-                self.l2_regularization,
-                self.sgd_step_size_scheduling_exponent,
-                self.sgd_step_size_scheduling_multiplier,
-                self.use_switch)
-
-        params = [
-                'sgd_weights',
-                'sgd_bias',
-                'asgd_weights',
-                'asgd_bias',
-                'n_observations',
-                'sgd_step_size0']
+        updates, cost, svar, fn = self._get_fit_fn()
 
         for key, val in [
                 ('obs', X),
@@ -299,7 +288,7 @@ class TheanoBinaryASGD(NaiveBinaryASGD):
                 ]:
             svar[key].set_value(val, borrow=True)
 
-        for key in params:
+        for key in self._param_names:
             svar[key].set_value(getattr(self, key), borrow=True)
 
         for i in xrange(n_iterations):
@@ -312,9 +301,7 @@ class TheanoBinaryASGD(NaiveBinaryASGD):
                 fn_fn = fn.fn
                 for i in xrange(n_points): fn_fn()
 
-            self.train_means.append(
-                    svar['mean_cost'].get_value()
-                    + self.l2_regularization * (self.asgd_weights ** 2).sum())
+            self._append_train_mean(svar['mean_cost'].get_value())
 
             if self.fit_converged():
                 break
