@@ -141,7 +141,7 @@ class DetermineStepSizeMixin(object):
         self.sgd_step_size = self.sgd_step_size0
 
     def evaluate_step_size(self, X, y, sgd_step_size0):
-        other = copy.deepcopy(self)
+        other = self.determine_step_size_copy()
         other.sgd_step_size0 = sgd_step_size0
         other.sgd_step_size = sgd_step_size0
         other.partial_fit(X, y)
@@ -153,6 +153,9 @@ class DetermineStepSizeMixin(object):
         l2_cost = other.l2_regularization * (weights ** 2).sum()
         cost = np.maximum(0, 1 - margin) + l2_cost
         return cost.mean()
+
+    def determine_step_size_copy(self):
+        return copy.deepcopy(self)
 
 
 class NaiveBinaryASGD(BaseASGD, DetermineStepSizeMixin):
