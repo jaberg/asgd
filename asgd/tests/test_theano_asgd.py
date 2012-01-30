@@ -12,6 +12,7 @@ from asgd.naive_asgd import NaiveBinaryASGD
 from test_naive_asgd import get_fake_data
 try:
     from asgd.theano_asgd import TheanoBinaryASGD
+    import theano
 except ImportError:
     print >> sys.stderr, "\nWARNING: SKIPPING ALL TESTS REQUIRING THEANO"
 
@@ -134,19 +135,13 @@ def test_theano_binary_asgd_converges_to_truth():
 @requires_theano
 def run_theano_binary_asgd_speed():
 
-    if 1:
-        N_POINTS = 1000
-        dtypes = ['float64']
-        sizes = [1e5]
-    else:
-        N_POINTS = 500
-        sizes=[1e2, 1e3, 1e4, 1e5]
-        dtypes=['float32', 'float64']
+    N_POINTS = 500
+    sizes=[1e2, 1e3, 1e4, 1e5]
+    dtypes=['float32', 'float64']
 
     rstate = RandomState(42)
     XX, y = get_fake_data(N_POINTS, max(sizes), rstate)
 
-    import theano
     dtype_orig = theano.config.floatX
 
     for dtype in dtypes:
@@ -155,18 +150,18 @@ def run_theano_binary_asgd_speed():
             X = XX[:,:N_FEATURES].astype(dtype)
 
             kwargs = dict(DEFAULT_KWARGS)
+            kwargs['sgd_step_size0'] = None
             kwargs['dtype'] = dtype
 
             clf0 = NaiveBinaryASGD(N_FEATURES, rstate=copy(rstate), **kwargs)
             clf1 = TheanoBinaryASGD(N_FEATURES, rstate=copy(rstate), **kwargs)
-            clf1.compile_train_fn_2()
 
             t = time.time()
-            clf0.partial_fit(X, y)
+            clf0.fit(X, y)
             t0 = time.time() - t
 
             t = time.time()
-            clf1.partial_fit(X, y)
+            clf1.fit(X, y)
             t1 = time.time() - t
             print 'N_FEAT:%i  dtype:%s  Naive:%.3f  Theano:%.3f' % (
                     N_FEATURES, dtype, t0, t1)
