@@ -2,8 +2,7 @@
 import numpy as np
 from itertools import izip
 
-from naive_asgd import BaseASGD
-from naive_asgd import DetermineStepSizeMixin
+from naive_asgd import NaiveBinaryASGD
 
 from naive_asgd import (
         DEFAULT_SGD_STEP_SIZE0,
@@ -20,7 +19,167 @@ import theano.ifelse
 import theano.tensor as tensor
 
 
-class TheanoBinaryASGD(BaseASGD, DetermineStepSizeMixin):
+def vector_updates(
+        # symbolic args
+        obs,
+        label,
+        n_observations,
+        sgd_step_size0,
+        sgd_weights,
+        sgd_bias,
+        asgd_weights,
+        asgd_bias,
+        # non-symbolic args
+        l2_regularization,
+        sgd_step_size_scheduling_exponent,
+        sgd_step_size_scheduling_multiplier,
+        use_switch,
+        ):
+
+    sgd_n = (1 +
+            sgd_step_size0 * n_observations
+            * sgd_step_size_scheduling_multiplier)
+    sgd_step_size = tensor.cast(
+            (sgd_step_size0
+                / (sgd_n ** sgd_step_size_scheduling_exponent)),
+            sgd_weights.dtype)
+
+
+    # switch to geometric moving average after a while
+    # ALSO - this means that mul rather than div is used in the fused
+    # elementwise loop that updates asgd_weights, which is faster
+    asgd_step_size = tensor.maximum(
+            tensor.cast(
+                1.0 / (n_observations + 1),
+                asgd_bias.dtype),
+            1e-5)
+
+
+    margin = label * (tensor.dot(obs, sgd_weights) + sgd_bias)
+    regularized_sgd_weights = sgd_weights * tensor.cast(
+            1 - l2_regularization * sgd_step_size,
+            sgd_weights.dtype)
+
+    assert regularized_sgd_weights.dtype == sgd_weights.dtype
+    assert obs.dtype == sgd_weights.dtype
+    assert label.dtype == sgd_weights.dtype
+    assert sgd_step_size.dtype == sgd_weights.dtype
+
+    new_sgd_weights = switch(margin < 1,
+            regularized_sgd_weights + sgd_step_size * label * obs,
+            regularized_sgd_weights)
+    new_sgd_bias = switch(margin < 1,
+            sgd_bias + sgd_step_size * label,
+            1 * sgd_bias)
+    cost = switch(margin < 1, 1 - margin, 0 * margin)
+
+    new_asgd_weights = ((1.0 - asgd_step_size) * asgd_weights
+        + asgd_step_size * new_sgd_weights)
+    new_asgd_bias = ((1.0 - asgd_step_size) * asgd_bias
+            + asgd_step_size * new_sgd_bias)
+
+    new_n_observations = n_observations + 1
+
+    updates = {
+                sgd_weights: new_sgd_weights,
+                sgd_bias: new_sgd_bias,
+                asgd_weights: new_asgd_weights,
+                asgd_bias: new_asgd_bias,
+                n_observations: new_n_observations}
+    return updates, cost
+
+_fn_cache = {}
+
+def get_fit_fn(dtype,
+        l2_regularization,
+        sgd_step_size_scheduling_exponent,
+        sgd_step_size_scheduling_multiplier,
+        use_switch,
+        ):
+    # This calling strategy is fast, but depends on the use of the CVM
+    # linker.
+
+    signature = (dtype,
+            l2_regularization,
+            sgd_step_size_scheduling_exponent,
+            sgd_step_size_scheduling_multiplier,
+            use_switch)
+    try:
+        return _fn_cache[signature]
+    except KeyError:
+        pass
+
+    svar = {}
+    svar['s_n_observations'] = theano.shared(
+                np.asarray(0).astype('int64'),
+                name='n_observations',
+                allow_downcast=True)
+
+    svar['s_sgd_step_size0'] = theano.shared(
+                np.asarray(0).astype(dtype),
+                name='sgd_step_size0',
+                allow_downcast=True)
+
+    svar['s_sgd_weights'] = theano.shared(
+                np.zeros((n_features), dtype=dtype),
+                name='sgd_weights',
+                allow_downcast=True)
+
+    svar['s_sgd_bias'] = theano.shared(
+                np.asarray(0, dtype=dtype),
+                name='sgd_bias')
+
+    svar['s_asgd_weights'] = theano.shared(
+                np.zeros((n_features), dtype=dtype),
+                name='asgd_weights')
+
+    svar['s_asgd_bias'] = theano.shared(
+                np.asarray(0, dtype=dtype),
+                name='asgd_bias')
+
+    svar['obs'] = obs = theano.shared(np.zeros((2, 2),
+            dtype=self.dtype),
+            allow_downcast=True,
+            name='obs')
+
+    # N.B. labels are float
+    svar['label'] = label = theano.shared(np.zeros(2, dtype=self.dtype),
+            allow_downcast=True,
+            name='label')
+    svar['idx'] = idx = theano.shared(np.asarray(0, dtype='int64'))
+    svar['idxmap'] = idxmap = theano.shared(np.zeros(2, dtype='int64'), strict=True)
+    svar['mean_cost'] = mean_cost = theano.shared(np.asarray(0, dtype=dtype))
+
+    updates, cost = vector_updates(
+            obs[idxmap[idx]],
+            label[idxmap[idx]],
+            svar['n_observations'],
+            svar['sgd_step_size0'],
+            svar['sgd_weights'],
+            svar['sgd_bias'],
+            svar['asgd_weights'],
+            svar['asgd_bias'],
+            l2_regularization,
+            sgd_step_size_scheduling_exponent,
+            sgd_step_size_scheduling_multiplier,
+            use_switch)
+
+    updates[idx] = idx + 1
+    # mean cost over idxmap
+    aa = tensor.cast(1.0 / (idx + 1), dtype)
+    updates[mean_cost] = (1 - aa) * mean_cost + aa * cost
+
+    fn = theano.function([], [],
+            updates=updates,
+            mode=theano.Mode(
+                optimizer='fast_run',
+                linker='cvm_nogc'))
+
+    _fn_cache[signature] = (updates, cost, svar, fn)
+
+
+
+class TheanoBinaryASGD_A(NaiveBinaryASGD):
 
     """
     Notes regarding speed:
@@ -33,194 +192,24 @@ class TheanoBinaryASGD(BaseASGD, DetermineStepSizeMixin):
     advantage as loop fusion / proper BLAS usage.
     """
 
-    sgd_weights = property(
-            lambda self: self.s_sgd_weights.get_value(),
-            lambda self, val: self.s_sgd_weights.set_value(val))
+    use_switch = True
 
-    sgd_bias = property(
-            lambda self: self.s_sgd_bias.get_value(),
-            lambda self, val: self.s_sgd_bias.set_value(np.asarray(val)))
-
-    asgd_weights = property(
-            lambda self: self.s_asgd_weights.get_value(),
-            lambda self, val: self.s_asgd_weights.set_value(val))
-
-    asgd_bias = property(
-            lambda self: self.s_asgd_bias.get_value(),
-            lambda self, val: self.s_asgd_bias.set_value(np.asarray(val)))
-
-    n_observations = property(
-            lambda self: self.s_n_observations.get_value(),
-            lambda self, val: self.s_n_observations.set_value(np.asarray(val)))
-
-    sgd_step_size0 = property(
-            lambda self: self.s_sgd_step_size0.get_value(),
-            lambda self, val: self.s_sgd_step_size0.set_value(np.asarray(val)))
-
-    use_switch = False
-
-    def __init__(self, n_features,
-            sgd_step_size0=DEFAULT_SGD_STEP_SIZE0,
-            l2_regularization=DEFAULT_L2_REGULARIZATION,
-            n_iterations=DEFAULT_N_ITERATIONS,
-            feedback=DEFAULT_FEEDBACK,
-            rstate=DEFAULT_RSTATE,
-            dtype=DEFAULT_DTYPE,
-            sgd_step_size_scheduling_exponent=DEFAULT_SGD_EXPONENT,
-            sgd_step_size_scheduling_multiplier=DEFAULT_SGD_TIMESCALE):
-
-        self.s_n_observations = theano.shared(
-                np.asarray(0).astype('int64'),
-                name='n_observations',
-                allow_downcast=True)
-
-        self.s_sgd_step_size0 = theano.shared(
-                np.asarray(0).astype(dtype),
-                name='sgd_step_size0',
-                allow_downcast=True)
-
-        self.s_sgd_weights = theano.shared(
-                np.zeros((n_features), dtype=dtype),
-                name='sgd_weights',
-                allow_downcast=True)
-
-        self.s_sgd_bias = theano.shared(
-                np.asarray(0, dtype=dtype),
-                name='sgd_bias')
-
-        self.s_asgd_weights = theano.shared(
-                np.zeros((n_features), dtype=dtype),
-                name='asgd_weights')
-
-        self.s_asgd_bias = theano.shared(
-                np.asarray(0, dtype=dtype),
-                name='asgd_bias')
-
-        BaseASGD.__init__(self,
-            n_features,
-            sgd_step_size0=sgd_step_size0,
-            l2_regularization=l2_regularization,
-            n_iterations=n_iterations,
-            feedback=feedback,
-            rstate=rstate,
-            dtype=dtype,
-            sgd_step_size_scheduling_exponent=sgd_step_size_scheduling_exponent,
-            sgd_step_size_scheduling_multiplier=sgd_step_size_scheduling_multiplier)
-
-    def __getstate__(self):
-        dct = dict(self.__dict__)
-        dynamic_attrs = [
-                '_train_fn_2',
-                '_tf2_obs',
-                '_tf2_idx',
-                '_tf2_idxmap',
-                '_tf2_mean_cost']
-        for attr in dynamic_attrs:
-            if attr in dct:
-                del dct[attr]
-        return dct
 
     def vector_updates(self, obs, label):
-        sgd_step_size_scheduling_exponent = \
-                self.sgd_step_size_scheduling_exponent
-        sgd_step_size_scheduling_multiplier = \
-                self.sgd_step_size_scheduling_multiplier
-        l2_regularization = self.l2_regularization
-
-        n_observations = self.s_n_observations
-        sgd_step_size0 = self.s_sgd_step_size0
-
-        sgd_weights = self.s_sgd_weights
-        sgd_bias = self.s_sgd_bias
-        sgd_n = (1 +
-                sgd_step_size0 * n_observations
-                * sgd_step_size_scheduling_multiplier)
-        sgd_step_size = tensor.cast(
-                (sgd_step_size0
-                    / (sgd_n ** sgd_step_size_scheduling_exponent)),
-                sgd_weights.dtype)
-
-        asgd_weights = self.s_asgd_weights
-        asgd_bias = self.s_asgd_bias
-
-        # switch to geometric moving average after a while
-        # ALSO - this means that mul rather than div is used in the fused
-        # elementwise loop that updates asgd_weights, which is faster
-        asgd_step_size = tensor.maximum(
-                tensor.cast(
-                    1.0 / (n_observations + 1),
-                    asgd_bias.dtype),
-                1e-5)
-
-
-        margin = label * (tensor.dot(obs, sgd_weights) + sgd_bias)
-        regularized_sgd_weights = sgd_weights * tensor.cast(
-                1 - l2_regularization * sgd_step_size,
-                sgd_weights.dtype)
-
-        if self.use_switch:
-            switch = tensor.switch
-        else:
-            # this is slower to evaluate, but if the features are long and the
-            # expected training classification rate is very good, then it
-            # can be faster.
-            switch = theano.ifelse.ifelse
-
-        assert regularized_sgd_weights.dtype == sgd_weights.dtype
-        assert obs.dtype == sgd_weights.dtype
-        assert label.dtype == sgd_weights.dtype
-        assert sgd_step_size.dtype == sgd_weights.dtype
-
-        new_sgd_weights = switch(margin < 1,
-                regularized_sgd_weights + sgd_step_size * label * obs,
-                regularized_sgd_weights)
-        new_sgd_bias = switch(margin < 1,
-                sgd_bias + sgd_step_size * label,
-                1 * sgd_bias)
-        cost = switch(margin < 1, 1 - margin, 0 * margin)
-
-        new_asgd_weights = ((1.0 - asgd_step_size) * asgd_weights
-            + asgd_step_size * new_sgd_weights)
-        new_asgd_bias = ((1.0 - asgd_step_size) * asgd_bias
-                + asgd_step_size * new_sgd_bias)
-
-        new_n_observations = n_observations + 1
-
-        updates = {
-                    sgd_weights: new_sgd_weights,
-                    sgd_bias: new_sgd_bias,
-                    asgd_weights: new_asgd_weights,
-                    asgd_bias: new_asgd_bias,
-                    n_observations: new_n_observations}
-        return updates, cost
+        return vector_updates(obs, label,
+                self.s_n_observations,
+                self.s_sgd_step_size0,
+                self.s_sgd_weights,
+                self.s_sgd_bias,
+                self.s_asgd_weights,
+                self.s_asgd_bias,
+                #
+                self.l2_regularization,
+                self.sgd_step_size_scheduling_exponent,
+                self.sgd_step_size_scheduling_multiplier,
+                self.use_switch):
 
     def compile_train_fn_2(self):
-        # This calling strategy is fast, but depends on the use of the CVM
-        # linker.
-        self._tf2_obs = obs = theano.shared(np.zeros((2, 2),
-            dtype=self.dtype),
-            allow_downcast=True,
-            name='obs')
-        # N.B. labels are float
-        self._tf2_label = label = theano.shared(np.zeros(2, dtype=self.dtype),
-                allow_downcast=True,
-                name='label')
-        self._tf2_idx = idx = theano.shared(np.asarray(0, dtype='int64'))
-        self._tf2_idxmap = idxmap = theano.shared(np.zeros(2, dtype='int64'),
-                strict=True)
-        self._tf2_mean_cost = mean_cost = theano.shared(
-                np.asarray(0, dtype='float64'))
-        updates, cost = self.vector_updates(obs[idxmap[idx]], label[idxmap[idx]])
-        updates[idx] = idx + 1
-        aa = tensor.cast(1.0 / (idx + 1), 'float64')
-        # mean cost over idxmap
-        updates[mean_cost] = (1 - aa) * mean_cost + aa * cost
-
-        self._train_fn_2 = theano.function([], [],
-                updates=updates,
-                mode=theano.Mode(
-                    optimizer='fast_run',
-                    linker='cvm_nogc'))
 
     def partial_fit(self, X, y):
         if '_train_fn_2' not in self.__dict__:
@@ -247,6 +236,7 @@ class TheanoBinaryASGD(BaseASGD, DetermineStepSizeMixin):
         return self
 
     def fit(self, X, y):
+        updates, cost, svar, fn = get_fit_fn()
         if '_train_fn_2' not in self.__dict__:
             self.compile_train_fn_2()
 
@@ -282,16 +272,3 @@ class TheanoBinaryASGD(BaseASGD, DetermineStepSizeMixin):
 
         return self
 
-    def decision_function(self, X):
-        return (np.dot(self.s_asgd_weights.get_value(borrow=True), X.T)
-                + self.asgd_bias)
-
-    def predict(self, X):
-        return np.sign(self.decision_function(X))
-
-    def reset(self):
-        BaseASGD.reset(self)
-        self.asgd_weights = self.asgd_weights * 0
-        self.asgd_bias = self.asgd_bias * 0
-        self.sgd_weights = self.sgd_weights * 0
-        self.sgd_bias = self.sgd_bias * 0
