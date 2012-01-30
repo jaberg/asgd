@@ -208,7 +208,7 @@ class TheanoBinaryASGD(NaiveBinaryASGD):
     # use_switch = False uses the lazy ifelse to avoid duplicate computations
     # but the resulting program typically runs more slowly.
     use_switch = True
-    self._param_names = [
+    _param_names = [
                 'sgd_weights',
                 'sgd_bias',
                 'asgd_weights',
