@@ -3,6 +3,7 @@
 naive, non-optimized implementation
 """
 
+import sys
 import numpy as np
 from numpy import dot
 from itertools import izip
@@ -10,12 +11,12 @@ from itertools import izip
 DEFAULT_SGD_STEP_SIZE0 = 1e-2
 DEFAULT_L2_REGULARIZATION = 1e-3
 DEFAULT_MIN_OBSERVATIONS = 1000
-DEFAULT_MAX_OBSERVATIONS = None
+DEFAULT_MAX_OBSERVATIONS = sys.maxint
 DEFAULT_FEEDBACK = False
 DEFAULT_RSTATE = None
 DEFAULT_DTYPE = np.float32
-
-DEFAULT_N_ITERATIONS = 10   # -- used for OVA
+DEFAULT_N_PARTIAL = 1000
+DEFAULT_FIT_TOLERANCE = 1e-2
 
 
 class BaseASGD(object):
@@ -25,6 +26,8 @@ class BaseASGD(object):
                  l2_regularization=DEFAULT_L2_REGULARIZATION,
                  min_observations=DEFAULT_MIN_OBSERVATIONS,
                  max_observations=DEFAULT_MAX_OBSERVATIONS,
+                 fit_n_partial=DEFAULT_N_PARTIAL,
+                 fit_tolerance=DEFAULT_FIT_TOLERANCE,
                  feedback=DEFAULT_FEEDBACK,
                  rstate=DEFAULT_RSTATE,
                  dtype=DEFAULT_DTYPE):
@@ -33,9 +36,14 @@ class BaseASGD(object):
         assert n_features > 1
         self.n_features = n_features
 
-        assert 0 <= min_observations <= max_observations
+        if not 0 <= min_observations <= max_observations:
+            raise ValueError('min_observations > max_observations',
+                    (min_observations, max_observations))
         self.min_observations = min_observations
         self.max_observations = max_observations
+
+        self.fit_n_partial = fit_n_partial
+        self.fit_tolerance = fit_tolerance
 
         if feedback:
             raise NotImplementedError("FIXME: feedback support is buggy")
@@ -65,10 +73,10 @@ class BaseASGD(object):
 
     def fit_converged(self):
         train_means = self.train_means
-        if len(train_means) > 1:
+        if len(train_means) > 2:
             midpt = len(train_means) // 2
-            if train_means[-1] > .99 * train_means[midpt]:
-                return True
+            thresh = (1 - self.fit_tolerance) * train_means[midpt]
+            return train_means[-1] > thresh
         return False
 
 
@@ -77,18 +85,19 @@ class BaseBinaryASGD(BaseASGD):
     def __init__(self, *args, **kwargs):
         BaseASGD.__init__(self, *args, **kwargs)
 
-        self.sgd_weights = np.zeros((n_features), dtype=dtype)
-        self.sgd_bias = np.zeros((1), dtype=dtype)
+        self.sgd_weights = np.zeros((self.n_features,), dtype=self.dtype)
+        self.sgd_bias = np.asarray(0, dtype=self.dtype)
 
-        self.asgd_weights = np.zeros((n_features), dtype=dtype)
-        self.asgd_bias = np.zeros((1), dtype=dtype)
-
+        self.asgd_weights = np.zeros((self.n_features,), dtype=self.dtype)
+        self.asgd_bias = np.asarray(0, dtype=self.dtype)
 
     def decision_function(self, X):
+        X = np.asarray(X)
         return dot(self.asgd_weights, X.T) + self.asgd_bias
 
     def predict(self, X):
         return np.sign(self.decision_function(X))
+
 
 class NaiveBinaryASGD(BaseBinaryASGD):
 
@@ -146,11 +155,11 @@ class NaiveBinaryASGD(BaseBinaryASGD):
                      sgd_step_size_scheduling_exponent)
             asgd_step_size = 1. / n_observations
 
-            if len(recent_train_costs) == min_observations:
+            if len(recent_train_costs) == self.fit_n_partial:
                 train_means.append(np.mean(recent_train_costs)
                         + l2_regularization * np.dot(
                             self.asgd_weights, self.asgd_weights))
-                recent_train_costs = []
+                self.recent_train_costs = recent_train_costs = []
 
         # --
         self.sgd_weights = sgd_weights
@@ -174,18 +183,30 @@ class NaiveBinaryASGD(BaseBinaryASGD):
         assert n_features == self.n_features
         assert n_points == y.size
 
-        n_iterations = self.n_iterations
+        n_points_remaining = self.max_observations - self.n_observations
 
-        for i in xrange(n_iterations):
+        while n_points_remaining > 0:
+
+            # -- every iteration will train from n_partial observations and
+            # then check for convergence
+            fit_n_partial = min(n_points_remaining, self.fit_n_partial)
 
             idx = self.rstate.permutation(n_points)
-            Xb = X[idx]
-            yb = y[idx]
+            Xb = X[idx[:fit_n_partial]]
+            yb = y[idx[:fit_n_partial]]
             self.partial_fit(Xb, yb)
 
             if self.feedback:
+                raise NotImplementedError(
+                    'partial_fit logic requires memory to be distinct')
                 self.sgd_weights = self.asgd_weights
                 self.sgd_bias = self.asgd_bias
+
+            if (self.n_observations >= self.min_observations
+                    and self.fit_converged()):
+                break
+
+            n_points_remaining -= len(Xb)
 
         return self
 
@@ -195,7 +216,10 @@ class NaiveOVAASGD(BaseASGD):
     def __init__(self, n_classes, n_features,
                  sgd_step_size0=DEFAULT_SGD_STEP_SIZE0,
                  l2_regularization=DEFAULT_L2_REGULARIZATION,
-                 n_iterations=DEFAULT_N_ITERATIONS,
+                 min_observations=DEFAULT_MIN_OBSERVATIONS,
+                 max_observations=DEFAULT_MAX_OBSERVATIONS,
+                 fit_n_partial=DEFAULT_N_PARTIAL,
+                 fit_tolerance=DEFAULT_FIT_TOLERANCE,
                  feedback=DEFAULT_FEEDBACK,
                  rstate=DEFAULT_RSTATE,
                  dtype=DEFAULT_DTYPE):
@@ -204,7 +228,10 @@ class NaiveOVAASGD(BaseASGD):
             n_features,
             sgd_step_size0=sgd_step_size0,
             l2_regularization=l2_regularization,
-            n_iterations=n_iterations,
+            min_observations=min_observations,
+            max_observations=max_observations,
+            fit_n_partial=fit_n_partial,
+            fit_tolerance=fit_tolerance,
             feedback=feedback,
             rstate=rstate,
             dtype=dtype,
@@ -299,18 +326,24 @@ class NaiveOVAASGD(BaseASGD):
         assert n_features == self.n_features
         assert n_points == y.size
 
-        n_iterations = self.n_iterations
 
-        for i in xrange(n_iterations):
+        n_points_remaining = self.max_observations - self.n_observations
+
+        while n_points_remaining > 0:
+            # -- every iteration will train from n_partial observations and
+            # then check for convergence
+            fit_n_partial = min(n_points_remaining, self.fit_n_partial)
 
             idx = self.rstate.permutation(n_points)
-            Xb = X[idx]
-            yb = y[idx]
+            Xb = X[idx[:fit_n_partial]]
+            yb = y[idx[:fit_n_partial]]
             self.partial_fit(Xb, yb)
 
             if self.feedback:
                 self.sgd_weights = self.asgd_weights
                 self.sgd_bias = self.asgd_bias
+
+            n_points_remaining -= len(Xb)
 
         return self
 

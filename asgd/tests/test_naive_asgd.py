@@ -1,3 +1,4 @@
+import sys
 from nose.tools import assert_equal, raises
 from nose.plugins.skip import SkipTest
 from numpy.testing import assert_allclose
@@ -16,7 +17,8 @@ N_FEATURES = 1e2
 DEFAULT_ARGS = (N_FEATURES,)
 DEFAULT_KWARGS = dict(sgd_step_size0=1e-3,
                       l2_regularization=1e-6,
-                      n_iterations=4,
+                      min_observations=4 * N_POINTS,
+                      max_observations=4 * N_POINTS,
                       dtype=np.float32)
 
 
@@ -41,7 +43,6 @@ def get_fake_multiclass_data(n_points, n_features, n_classes, rstate):
 
 
 def test_naive_asgd():
-
     rstate = RandomState(42)
 
     X, y = get_fake_data(N_POINTS, N_FEATURES, rstate)
@@ -50,6 +51,7 @@ def test_naive_asgd():
     clf = BinaryASGD(*DEFAULT_ARGS, rstate=rstate, **DEFAULT_KWARGS)
 
     clf.fit(X, y)
+    assert clf.n_observations == clf.min_observations == clf.max_observations
     ytrn_preds = clf.predict(X)
     ytst_preds = clf.predict(Xtst)
     ytrn_acc = (ytrn_preds == y).mean()
@@ -78,7 +80,6 @@ def test_naive_asgd_with_feedback():
 
 
 def test_naive_asgd_multi_labels():
-
     rstate = RandomState(44)
 
     X, y = get_fake_binary_data_multi_labels(N_POINTS, N_FEATURES, rstate)
@@ -87,7 +88,10 @@ def test_naive_asgd_multi_labels():
 
     # n_classes is 2 since it is actually a binary case
     clf = OVAASGD(2, N_FEATURES, sgd_step_size0=1e-3, l2_regularization=1e-6,
-                  n_iterations=4, dtype=np.float32, rstate=rstate)
+                  min_observations=4 * N_POINTS,
+                  max_observations=4 * N_POINTS,
+                  dtype=np.float32,
+                  rstate=rstate)
     clf.fit(X, y)
     ytrn_preds = clf.predict(X)
     ytst_preds = clf.predict(Xtst)
@@ -98,7 +102,6 @@ def test_naive_asgd_multi_labels():
 
 
 def test_naive_multiclass_ova_asgd():
-
     rstate = RandomState(45)
 
     n_classes = 10
@@ -108,7 +111,10 @@ def test_naive_multiclass_ova_asgd():
                                           rstate)
 
     clf = OVAASGD(n_classes, N_FEATURES, sgd_step_size0=1e-3,
-                  l2_regularization=1e-6, n_iterations=4, dtype=np.float32,
+                  l2_regularization=1e-6,
+                  min_observations=4 * N_POINTS,
+                  max_observations=4 * N_POINTS,
+                  dtype=np.float32,
                   rstate=rstate)
 
     clf.fit(X, y)
@@ -123,7 +129,6 @@ def test_naive_multiclass_ova_asgd():
 
 
 def test_naive_multiclass_ova_vs_binary_asgd():
-
     rstate = RandomState(42)
 
     n_classes = 3
@@ -162,7 +167,6 @@ def test_naive_multiclass_ova_vs_binary_asgd():
 
 @raises(ValueError)
 def test_naive_ova_asgd_wrong_labels():
-
     rstate = RandomState(42)
 
     n_classes = 10
@@ -174,3 +178,34 @@ def test_naive_ova_asgd_wrong_labels():
                   rstate=RandomState(999), **DEFAULT_KWARGS)
     ytrn_bad = rstate.randint(n_classes + 42, size=len(ytrn))
     clf.partial_fit(Xtrn, ytrn_bad)
+
+
+def test_early_stopping():
+    rstate = RandomState(42)
+
+    for N_POINTS in (1000, 2000):
+
+        X, y = get_fake_data(N_POINTS, N_FEATURES, rstate)
+        Xtst, ytst = get_fake_data(N_POINTS, N_FEATURES, rstate)
+
+        kwargs = dict(DEFAULT_KWARGS)
+        kwargs['fit_n_partial'] = 1500
+        del kwargs['max_observations']
+        print kwargs
+        print 'N_POINTS', N_POINTS
+
+        clf = BinaryASGD(*DEFAULT_ARGS, rstate=rstate, **kwargs)
+
+        clf.fit(X, y)
+        print clf.fit_n_partial
+        print len(clf.train_means)
+        print clf.n_observations
+        assert clf.fit_n_partial == kwargs['fit_n_partial']
+        assert len(clf.train_means) == clf.n_observations / clf.fit_n_partial
+        assert clf.min_observations == kwargs['min_observations']
+        assert clf.max_observations == sys.maxint
+        assert clf.n_observations >= kwargs['min_observations']
+        assert clf.fit_converged()
+        ytrn_preds = clf.predict(X)
+        ytrn_acc = (ytrn_preds == y).mean()
+        assert ytrn_acc > 0.7
