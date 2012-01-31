@@ -85,7 +85,8 @@ def binary_fit(
 
     max_examples: int
         Maximum number of examples to use from `X` and `y` to find an
-        estimate of the best sgd_step_size0
+        estimate of the best sgd_step_size0. N.B. That the entirety of X and y
+        is used for the final fit() call after the best step size has been found.
 
     Returns
     -------
