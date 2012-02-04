@@ -15,8 +15,9 @@ DEFAULT_MAX_OBSERVATIONS = sys.maxint
 DEFAULT_FEEDBACK = False
 DEFAULT_RSTATE = None
 DEFAULT_DTYPE = np.float32
-DEFAULT_N_PARTIAL = 1000
-DEFAULT_FIT_TOLERANCE = 1e-2
+DEFAULT_N_PARTIAL = 5000
+DEFAULT_FIT_ABS_TOLERANCE = 1e-4
+DEFAULT_FIT_REL_TOLERANCE = 1e-2
 
 
 class BaseASGD(object):
@@ -27,7 +28,8 @@ class BaseASGD(object):
                  min_observations=DEFAULT_MIN_OBSERVATIONS,
                  max_observations=DEFAULT_MAX_OBSERVATIONS,
                  fit_n_partial=DEFAULT_N_PARTIAL,
-                 fit_tolerance=DEFAULT_FIT_TOLERANCE,
+                 fit_abs_tolerance=DEFAULT_FIT_ABS_TOLERANCE,
+                 fit_rel_tolerance=DEFAULT_FIT_REL_TOLERANCE,
                  feedback=DEFAULT_FEEDBACK,
                  rstate=DEFAULT_RSTATE,
                  dtype=DEFAULT_DTYPE):
@@ -43,7 +45,8 @@ class BaseASGD(object):
         self.max_observations = max_observations
 
         self.fit_n_partial = fit_n_partial
-        self.fit_tolerance = fit_tolerance
+        self.fit_abs_tolerance = fit_abs_tolerance
+        self.fit_rel_tolerance = fit_rel_tolerance
 
         if feedback:
             raise NotImplementedError("FIXME: feedback support is buggy")
@@ -73,9 +76,11 @@ class BaseASGD(object):
 
     def fit_converged(self):
         train_means = self.train_means
+        rel_tol = self.fit_rel_tolerance
+        abs_tol = self.fit_abs_tolerance
         if len(train_means) > 2:
             midpt = len(train_means) // 2
-            thresh = (1 - self.fit_tolerance) * train_means[midpt]
+            thresh = (1 - rel_tol) * train_means[midpt] - abs_tol
             return train_means[-1] > thresh
         return False
 
@@ -221,7 +226,8 @@ class NaiveOVAASGD(BaseASGD):
                  min_observations=DEFAULT_MIN_OBSERVATIONS,
                  max_observations=DEFAULT_MAX_OBSERVATIONS,
                  fit_n_partial=DEFAULT_N_PARTIAL,
-                 fit_tolerance=DEFAULT_FIT_TOLERANCE,
+                 fit_abs_tolerance=DEFAULT_FIT_ABS_TOLERANCE,
+                 fit_rel_tolerance=DEFAULT_FIT_REL_TOLERANCE,
                  feedback=DEFAULT_FEEDBACK,
                  rstate=DEFAULT_RSTATE,
                  dtype=DEFAULT_DTYPE):
@@ -233,7 +239,8 @@ class NaiveOVAASGD(BaseASGD):
             min_observations=min_observations,
             max_observations=max_observations,
             fit_n_partial=fit_n_partial,
-            fit_tolerance=fit_tolerance,
+            fit_abs_tolerance=fit_abs_tolerance,
+            fit_rel_tolerance=fit_rel_tolerance,
             feedback=feedback,
             rstate=rstate,
             dtype=dtype,
