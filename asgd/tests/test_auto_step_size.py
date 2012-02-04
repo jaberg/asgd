@@ -27,12 +27,13 @@ def test_binary_sgd_step_size0():
     X, y = get_fake_data(100, n_features, rstate)
 
     clf = get_new_model(n_features, rstate, 100)
-    best = find_sgd_step_size0(clf, X, y, (.25, .5))
-    assert_almost_equal(best, -4.9927, decimal=4)
+    best0 = find_sgd_step_size0(clf, (X, y), (.25, .5), tolerance=1e-6)
 
     # start a little lower, still works
-    best = find_sgd_step_size0(clf, X, y, (.125, .25))
-    assert_almost_equal(best, -4.6180, decimal=4)
+    best1 = find_sgd_step_size0(clf, (X, y), (.125, .25), tolerance=1e-6)
+    print best0, best1
+    assert_almost_equal(best0, 0.03501, decimal=4)
+    assert_almost_equal(best1, 0.03501, decimal=4)
 
     # find_sgd_step_size0 does not change clf
     assert clf.sgd_step_size0 == 1000.0
@@ -44,23 +45,23 @@ def test_binary_fit():
 
     clf100 = get_new_model(n_features, rstate, 100)
     X, y = get_fake_data(100, n_features, rstate)
-    _clf100 = binary_fit(clf100, X, y)
+    _clf100 = binary_fit(clf100, (X, y))
     assert _clf100 is clf100
-    assert_almost_equal(clf100.sgd_step_size0, 0.04812, decimal=4)
+    assert_almost_equal(clf100.sgd_step_size0, 0.00954, decimal=4)
 
     # smoke test
     clf1000 = get_new_model(n_features, rstate, 1000)
     X, y = get_fake_data(DEFAULT_MAX_EXAMPLES, n_features, rstate)
-    _clf1000 = binary_fit(clf1000, X, y)
+    _clf1000 = binary_fit(clf1000, (X, y))
     assert _clf1000 is clf1000
-    assert_almost_equal(clf1000.sgd_step_size0, 0.0047, decimal=4)
+    assert_almost_equal(clf1000.sgd_step_size0, 0.00201, decimal=4)
 
     # smoke test that at least it runs
     clf2000 = get_new_model(n_features, rstate, 2000)
     X, y = get_fake_data(2000, n_features, rstate)
-    _clf2000 = binary_fit(clf2000, X, y)
+    _clf2000 = binary_fit(clf2000, (X, y))
     assert _clf2000 == clf2000
-    assert_almost_equal(clf2000.sgd_step_size0, 0.0067, decimal=4)
+    assert_almost_equal(clf2000.sgd_step_size0, 0.001498, decimal=4)
 
 
 def test_fit_replicable():
@@ -70,10 +71,10 @@ def test_fit_replicable():
     X, y = get_fake_data(100, n_features, RandomState(4))
 
     m0 = get_new_model(n_features, RandomState(45), 100)
-    m0 = binary_fit(m0, X, y)
+    m0 = binary_fit(m0, (X, y))
 
     m1 = get_new_model(n_features, RandomState(45), 100)
-    m1 = binary_fit(m1, X, y)
+    m1 = binary_fit(m1, (X, y))
 
     assert_array_equal(m0.sgd_weights, m1.sgd_weights)
     assert_array_equal(m0.sgd_bias, m1.sgd_bias)
