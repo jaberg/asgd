@@ -1,6 +1,9 @@
 import copy
+import logging
 import numpy as np
 from scipy import optimize
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_INITIAL_RANGE = 0.25, 0.5
 DEFAULT_MAX_EXAMPLES = 1000  # estimate stepsize from this many examples
@@ -105,10 +108,13 @@ def binary_fit(
     # Find the best learning rate for that subset
     best = find_sgd_step_size0(
         model, [a[idxs] for a in fit_args], **find_sgd_step_size0_kwargs)
+    logger.info('found best: %f' % best)
 
     # Heuristic: take the best stepsize according to the first max_examples,
     # and go half that fast for the full run.
     stepdown = 5 * np.sqrt( float(len(all_idxs)) / float(len(idxs)))
+
+    logger.info('setting sgd_step_size: %f' % (best/stepdown))
     model.sgd_step_size0 = best / stepdown
     model.sgd_step_size = best / stepdown
     model.fit(*fit_args)
