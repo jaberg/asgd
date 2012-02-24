@@ -69,7 +69,8 @@ def find_sgd_step_size0(
     log2_best_sgd_step_size0 = optimize.brent(
         eval_size0, brack=np.log2(initial_range), tol=tolerance)
 
-    return 2 ** log2_best_sgd_step_size0
+    rval = max(2 ** log2_best_sgd_step_size0, 1e-7)
+    return rval
 
 
 def binary_fit(
