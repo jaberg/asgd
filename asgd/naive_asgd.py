@@ -87,10 +87,10 @@ class BaseASGD(object):
         train_means = self.train_means
         rtol = self.fit_rel_tolerance
         atol = self.fit_abs_tolerance
-        assert np.min(train_means) >= 0
 
         # -- check for perfect fit
         if len(train_means) > 1:
+            assert np.min(train_means) >= 0
             if np.allclose(train_means[-1], 0, atol=atol, rtol=rtol):
                 return True
 
@@ -149,7 +149,6 @@ class NaiveBinaryASGD(BaseBinaryASGD):
         n_observations = self.n_observations
         train_means = self.train_means
         recent_train_costs = self.recent_train_costs
-        min_observations = self.min_observations
 
         for obs, label in izip(X, y):
 
