@@ -75,13 +75,34 @@ class BaseASGD(object):
         self.recent_train_costs = []
 
     def fit_converged(self):
+        """
+        There are two convergence tests here. Training is considered to be
+        over if it has
+
+        * stalled: latest train_means is allclose to a previous one (*)
+
+        * terminated: latest train_means is allclose to 0
+
+        """
         train_means = self.train_means
-        rel_tol = self.fit_rel_tolerance
-        abs_tol = self.fit_abs_tolerance
+        rtol = self.fit_rel_tolerance
+        atol = self.fit_abs_tolerance
+        assert np.min(train_means) >= 0
+
+        # -- check for perfect fit
+        if len(train_means) > 1:
+            if np.allclose(train_means[-1], 0, atol=atol, rtol=rtol):
+                return True
+
+        # -- check for stall condition
         if len(train_means) > 2:
-            midpt = len(train_means) // 2
-            thresh = (1 - rel_tol) * train_means[midpt] - abs_tol
-            return train_means[-1] > thresh
+            old_pt = max(
+                    len(train_means) // 2,
+                    len(train_means) - 4)
+            thresh = (1 - rtol) * train_means[old_pt] - atol
+            if train_means[-1] > thresh:
+                return True
+
         return False
 
 
