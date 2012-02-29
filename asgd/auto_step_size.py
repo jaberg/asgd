@@ -1,21 +1,18 @@
 import copy
 import logging
 import numpy as np
-from scipy import optimize
+import scipy.optimize
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_INITIAL_RANGE = 0.25, 0.5
 DEFAULT_MAX_EXAMPLES = 1000  # estimate stepsize from this many examples
-DEFAULT_TOLERANCE = 0.01     # in logarithmic units of the training criterion
-DEFAULT_BRENT_OUTPUT = False
-
+DEFAULT_TOLERANCE = 1.0     # in log-2 units of the learning rate
+DEFAULT_SGD_STEP_SIZE_FLOOR = 1e-7  # -- for huge feature vectors, reduce this.
 
 
 def find_sgd_step_size0(
     model, partial_fit_args,
-    initial_range=DEFAULT_INITIAL_RANGE,
-    tolerance=DEFAULT_TOLERANCE, brent_output=DEFAULT_BRENT_OUTPUT):
+    tolerance=DEFAULT_TOLERANCE):
     """Use a Brent line search to find the best step size
 
     Parameters
@@ -26,15 +23,10 @@ def find_sgd_step_size0(
     partial_fit_args - tuple of arguments for model.partial_fit.
         This tuple must start with X, y, ...
 
-    initial_range: tuple of float
-        Initial range for the sgd_step_size0 search (low, high)
-
-    max_iterations:
-        Maximum number of interations
+    tolerance: in logarithmic step size units
 
     Returns
     -------
-    best_sgd_step_size0: float
         Optimal sgd_step_size0 given `X` and `y`.
     """
     # -- stupid scipy calls some sizes twice!?
@@ -42,7 +34,7 @@ def find_sgd_step_size0(
 
     def eval_size0(log2_size0):
         try:
-            return _cache[log2_size0]
+            return _cache[float(log2_size0)]
         except KeyError:
             pass
         other = copy.deepcopy(model)
@@ -58,24 +50,30 @@ def find_sgd_step_size0(
         X, y = partial_fit_args[:2]
         margin = y * (np.dot(X, weights) + bias)
         l2_cost = other.l2_regularization * (weights ** 2).sum()
+        #print 'Hinge:', np.maximum(0, 1 - margin).mean()
+        #print 'L2', l2_cost
         rval = np.maximum(0, 1 - margin).mean() + l2_cost
         if np.isnan(rval):
             rval = float('inf')
-        # -- apply minimizer in log domain
-        rval = np.log(rval)
-        _cache[log2_size0] = rval
+        #print 'find step %e: %e' % (current_step_size, rval)
         return rval
 
-    log2_best_sgd_step_size0 = optimize.brent(
-        eval_size0, brack=np.log2(initial_range), tol=tolerance)
+    log2_best_sgd_step_size0 = scipy.optimize.fmin(
+            eval_size0,
+            x0=np.log2(model.sgd_step_size0),
+            xtol=tolerance,
+            )
 
-    rval = max(2 ** log2_best_sgd_step_size0, 1e-7)
+    #print 'Brent came back with', log2_best_sgd_step_size0, 2 ** log2_best_sgd_step_size0
+
+    rval = 2.0 ** log2_best_sgd_step_size0
     return rval
 
 
 def binary_fit(
     model, fit_args,
     max_examples=DEFAULT_MAX_EXAMPLES,
+    step_size_floor=DEFAULT_SGD_STEP_SIZE_FLOOR,
     **find_sgd_step_size0_kwargs):
     """Returns a model with automatically-selected sgd_step_size0
 
@@ -109,15 +107,16 @@ def binary_fit(
     # Find the best learning rate for that subset
     best = find_sgd_step_size0(
         model, [a[idxs] for a in fit_args], **find_sgd_step_size0_kwargs)
-    logger.info('found best: %f' % best)
+    logger.info('found best: %e' % best)
 
     # Heuristic: take the best stepsize according to the first max_examples,
     # and go half that fast for the full run.
-    stepdown = 5 * np.sqrt( float(len(all_idxs)) / float(len(idxs)))
+    stepdown = np.sqrt( float(len(all_idxs)) / float(len(idxs)))
+    step_size0 = max(best / stepdown, step_size_floor)
 
-    logger.info('setting sgd_step_size: %f' % (best/stepdown))
-    model.sgd_step_size0 = best / stepdown
-    model.sgd_step_size = best / stepdown
+    logger.info('setting sgd_step_size: %e' % step_size0)
+    model.sgd_step_size0 = float(step_size0)
+    model.sgd_step_size = float(step_size0)
     model.fit(*fit_args)
 
     return model
