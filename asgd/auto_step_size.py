@@ -44,15 +44,11 @@ def find_sgd_step_size0(
         other.partial_fit(*partial_fit_args)
         # Hack: asgd is lower variance than sgd, but it's tuned to work
         # well asymptotically, not after just a few examples
-        weights = .5 * (other.asgd_weights + other.sgd_weights)
-        bias = .5 * (other.asgd_bias + other.sgd_bias)
+        other.asgd_weights = .5 * (other.asgd_weights + other.sgd_weights)
+        other.asgd_bias = .5 * (other.asgd_bias + other.sgd_bias)
 
         X, y = partial_fit_args[:2]
-        margin = y * (np.dot(X, weights) + bias)
-        l2_cost = other.l2_regularization * (weights ** 2).sum()
-        #print 'Hinge:', np.maximum(0, 1 - margin).mean()
-        #print 'L2', l2_cost
-        rval = np.maximum(0, 1 - margin).mean() + l2_cost
+        rval = other.cost(X, y)
         if np.isnan(rval):
             rval = float('inf')
         #print 'find step %e: %e' % (current_step_size, rval)
@@ -70,6 +66,7 @@ def find_sgd_step_size0(
     return rval
 
 
+# XXX: use different name, function is not specific to binary classification
 def binary_fit(
     model, fit_args,
     max_examples=DEFAULT_MAX_EXAMPLES,
