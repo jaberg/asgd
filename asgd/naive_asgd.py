@@ -365,7 +365,6 @@ class NaiveRankASGD(BaseMultiASGD):
     """
 
     def partial_fit(self, X, y):
-
         if set(y) > set(range(self.n_classes)):
             raise ValueError("Invalid 'y'")
 
@@ -395,13 +394,13 @@ class NaiveRankASGD(BaseMultiASGD):
             # -- compute margin
             decision = dot(obs, sgd_weights) + sgd_bias
 
+            dsrt = np.argsort(decision)
+            distractor = dsrt[-2] if dsrt[-1] == label else dsrt[-1]
+            margin = decision[label] - decision[distractor]
+
             # -- update sgd
             if l2_regularization:
-                sgd_weights *= (1 - l2_regularization * sgd_step_size)
-
-            dsrt = np.argsort(decision)
-            distractor = dsrt[-2] if dsrt[-1] is label else dsrt[-1]
-            margin = decision[label] - decision[distractor]
+                sgd_weights *= 1 - l2_regularization * sgd_step_size
 
             if margin < 1:
                 winc = sgd_step_size * obs
@@ -414,8 +413,6 @@ class NaiveRankASGD(BaseMultiASGD):
                 recent_train_costs.append(0.0)
 
             # -- update asgd
-            # -- TODO: delay updates until sgd_weights are modified,
-            #          only 2 rows change per iteration
             asgd_weights = (1 - asgd_step_size) * asgd_weights \
                     + asgd_step_size * sgd_weights
             asgd_bias = (1 - asgd_step_size) * asgd_bias \
@@ -450,15 +447,14 @@ class NaiveRankASGD(BaseMultiASGD):
 
         return self
 
-
     def cost(self, X, y):
         weights = self.asgd_weights
         bias = self.asgd_bias
-        decisions = dot(X, weights) + bias
+        decisions = dot(np.asarray(X), weights) + bias
         margins = []
         for decision, label in zip(decisions, y):
             dsrt = np.argsort(decision)
-            distractor = dsrt[-2] if dsrt[-1] is label else dsrt[-1]
+            distractor = dsrt[-2] if dsrt[-1] == label else dsrt[-1]
             margin = decision[label] - decision[distractor]
             margins.append(margin)
 
@@ -467,3 +463,163 @@ class NaiveRankASGD(BaseMultiASGD):
         l2_cost = self.l2_regularization * l2_term
         rval = np.maximum(0, 1 - np.asarray(margins)).mean() + l2_cost
         return rval
+
+
+#import line_profiler
+#profile = line_profiler.LineProfiler()
+#import time
+
+
+class SparseUpdateRankASGD(BaseMultiASGD):
+    """
+    Implements rank-based multiclass SVM.
+    """
+
+    #@profile
+    def partial_fit(self, X, y):
+        if set(y) > set(range(self.n_classes)):
+            raise ValueError("Invalid 'y'")
+        #ttt = time.time()
+
+        sgd_step_size0 = self.sgd_step_size0
+        sgd_step_size = self.sgd_step_size
+        sgd_step_size_scheduling_exponent = \
+                self.sgd_step_size_scheduling_exponent
+        sgd_step_size_scheduling_multiplier = \
+                self.sgd_step_size_scheduling_multiplier
+        sgd_weights = np.asarray(self.sgd_weights, order='F')
+        sgd_bias = self.sgd_bias
+
+        asgd_weights = np.asarray(self.asgd_weights, order='F')
+        asgd_bias = self.asgd_bias
+        asgd_step_size = self.asgd_step_size
+
+        l2_regularization = self.l2_regularization
+
+        n_observations = self.n_observations
+        n_classes = self.n_classes
+
+        train_means = self.train_means
+        recent_train_costs = self.recent_train_costs
+
+        # -- the logical sgd_weight matrix is sgd_weights_scale * sgd_weights
+        sgd_weights_scale = 1.0
+
+        use_asgd_scale = True
+
+        if use_asgd_scale:
+            # -- the logical asgd_weights is stored as a row-wise linear
+            # -- combination of asgd_weights and sgd_weights
+            asgd_scale = np.ones((n_classes, 2), dtype=asgd_weights.dtype)
+            asgd_scale[:, 1] = 0  # -- originally there is no sgd contribution
+
+        for obs, label in izip(X, y):
+
+            # -- compute margin
+            decision = sgd_weights_scale * dot(obs, sgd_weights) + sgd_bias
+
+            dsrt = np.argsort(decision)
+            distractor = dsrt[-2] if dsrt[-1] == label else dsrt[-1]
+            margin = decision[label] - decision[distractor]
+
+            # -- update sgd
+            sgd_weights_scale *= 1 - l2_regularization * sgd_step_size
+
+            if margin < 1:
+                # -- perform the delayed updates to the rows of asgd
+
+                if use_asgd_scale:
+                    # -- XXX: this should be a single BLAS call to axpy
+                    asgd_weights[:, distractor] *= asgd_scale[distractor, 0]
+                    asgd_weights[:, distractor] += \
+                            (asgd_scale[distractor, 1] * sgd_weights_scale) \
+                            * sgd_weights[:, distractor]
+                    asgd_scale[distractor] = [1, 0]
+
+                    # -- XXX: this should be a single BLAS call to axpy
+                    asgd_weights[:, label] *= asgd_scale[label, 0]
+                    asgd_weights[:, label] += \
+                            (asgd_scale[label, 1] * sgd_weights_scale)\
+                            * sgd_weights[:, label]
+                    asgd_scale[label] = [1, 0]
+
+                winc = (sgd_step_size / sgd_weights_scale) * obs
+                sgd_weights[:, distractor] -= winc
+                sgd_weights[:, label] += winc
+                sgd_bias[distractor] -= sgd_step_size
+                sgd_bias[label] += sgd_step_size
+                recent_train_costs.append(1 - float(margin))
+            else:
+                recent_train_costs.append(0.0)
+
+            if use_asgd_scale:
+                # -- update asgd via scale variables
+                asgd_scale *= (1 - asgd_step_size)
+                asgd_scale[:, 1] += asgd_step_size
+            else:
+                asgd_weights = (1 - asgd_step_size) * asgd_weights \
+                        + asgd_step_size * sgd_weights
+
+            asgd_bias = (1 - asgd_step_size) * asgd_bias \
+                    + asgd_step_size * sgd_bias
+
+            # -- update step_sizes
+            n_observations += 1
+            sgd_step_size_scheduling = (1 + sgd_step_size0 * n_observations *
+                                        sgd_step_size_scheduling_multiplier)
+            sgd_step_size = sgd_step_size0 / \
+                    (sgd_step_size_scheduling ** \
+                     sgd_step_size_scheduling_exponent)
+            asgd_step_size = 1. / n_observations
+
+            if len(recent_train_costs) == self.fit_n_partial:
+                if use_asgd_scale:
+                    asgd_weights[:] *= asgd_scale[:, 0]
+                    asgd_weights[:] += (sgd_weights_scale * asgd_scale[:, 1]) * sgd_weights
+                    asgd_scale[:, 0] = 1
+                    asgd_scale[:, 1] = 0
+
+                flat_weights = asgd_weights.flatten()
+                l2_term = np.dot(flat_weights, flat_weights)
+                train_means.append(np.mean(recent_train_costs)
+                        + l2_regularization * l2_term)
+                self.recent_train_costs = recent_train_costs = []
+
+        # --
+        self.sgd_weights = sgd_weights * sgd_weights_scale
+        self.sgd_bias = sgd_bias
+        self.sgd_step_size = sgd_step_size
+
+        if use_asgd_scale:
+            asgd_weights[:] *= asgd_scale[:, 0]
+            asgd_weights[:] += (sgd_weights_scale * asgd_scale[:, 1]) * sgd_weights
+            asgd_scale[:, 0] = 1
+            asgd_scale[:, 1] = 0
+
+        self.asgd_weights = asgd_weights
+        self.asgd_bias = asgd_bias
+        self.asgd_step_size = asgd_step_size
+
+        self.n_observations = n_observations
+
+        #profile.print_stats()
+        #print 'n_obs', n_observations, 'time/%i' % len(X), (time.time() - ttt)
+        return self
+
+    def cost(self, X, y):
+        weights = self.asgd_weights
+        bias = self.asgd_bias
+        decisions = dot(np.asarray(X), weights) + bias
+        margins = []
+        for decision, label in zip(decisions, y):
+            dsrt = np.argsort(decision)
+            distractor = dsrt[-2] if dsrt[-1] == label else dsrt[-1]
+            margin = decision[label] - decision[distractor]
+            margins.append(margin)
+
+        flat_weights = weights.flatten()
+        l2_term = np.dot(flat_weights, flat_weights)
+        l2_cost = self.l2_regularization * l2_term
+        rval = np.maximum(0, 1 - np.asarray(margins)).mean() + l2_cost
+        return rval
+

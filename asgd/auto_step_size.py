@@ -1,5 +1,6 @@
 import copy
 import logging
+import time
 import numpy as np
 import scipy.optimize
 
@@ -102,9 +103,11 @@ def binary_fit(
     idxs = all_idxs[:max_examples]
 
     # Find the best learning rate for that subset
+    t0 = time.time()
     best = find_sgd_step_size0(
         model, [a[idxs] for a in fit_args], **find_sgd_step_size0_kwargs)
-    logger.info('found best: %e' % best)
+    logger.info('found best stepsize %e in %f seconds' % (
+        best, time.time() - t0))
 
     # Heuristic: take the best stepsize according to the first max_examples,
     # and go half that fast for the full run.
@@ -114,6 +117,8 @@ def binary_fit(
     logger.info('setting sgd_step_size: %e' % step_size0)
     model.sgd_step_size0 = float(step_size0)
     model.sgd_step_size = float(step_size0)
+    t0 = time.time()
     model.fit(*fit_args)
+    logger.info('full fit took %f seconds' % (time.time() - t0))
 
     return model
