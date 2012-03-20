@@ -1,3 +1,8 @@
+"""
+Automatic heuristic solver selection: LinearSVM
+
+"""
+
 import numpy as np
 
 from .auto_step_size import binary_fit
