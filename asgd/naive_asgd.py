@@ -165,7 +165,8 @@ class BaseBinaryASGD(BaseASGD):
         bias = self.asgd_bias
         margin = y * (np.dot(X, weights) + bias)
         l2_cost = self.l2_regularization * (weights ** 2).sum()
-        rval = np.maximum(0, 1 - margin).mean() + l2_cost
+        hinge_loss = np.maximum(0, 1 - margin)
+        rval = hinge_loss.mean() + l2_cost
         return rval
 
 
@@ -311,7 +312,7 @@ class NaiveOVAASGD(BaseMultiASGD):
 
             violations = margin < 1
 
-            if violations:
+            if np.any(violations):
                 label_violated = label[violations]
                 sgd_weights[:, violations] += (
                     sgd_step_size
@@ -475,6 +476,11 @@ class SparseUpdateRankASGD(BaseMultiASGD):
     Implements rank-based multiclass SVM.
     """
 
+    #XXX
+    #XXX
+    # TODO: implement l2-SVM here by updating
+    #       sgd rows in proportion to hinge loss
+
     #@profile
     def partial_fit(self, X, y):
         if set(y) > set(range(self.n_classes)):
@@ -570,7 +576,10 @@ class SparseUpdateRankASGD(BaseMultiASGD):
             sgd_step_size = sgd_step_size0 / \
                     (sgd_step_size_scheduling ** \
                      sgd_step_size_scheduling_exponent)
-            asgd_step_size = 1. / n_observations
+            if n_observations <= self.fit_n_partial:
+                asgd_step_size = 1.
+            else:
+                asgd_step_size = 1. / (n_observations - self.fit_n_partial)
 
             if len(recent_train_costs) == self.fit_n_partial:
                 if use_asgd_scale:

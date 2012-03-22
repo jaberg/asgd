@@ -90,10 +90,9 @@ class LinearSVM(object):
                 raise NotImplementedError('labels need adapting',
                         set(y))
             if solver == 'auto':
-                # TODO: switch to OVA and use libSVM?
-                #if n_feats > n_train:
-                #solver = ('asgd.NaiveRankASGD', { })
-                solver = ('asgd.SparseUpdateRankASGD', {})
+                solver = ('asgd.SparseUpdateRankASGD', {
+                        'sgd_step_size0': 10.0 / X.shape[1],
+                        })
 
             method, method_kwargs = solver
 
@@ -131,8 +130,14 @@ class LinearSVM(object):
                 raise NotImplementedError(method)
 
             elif method == 'sklearn.svm.LinearSVC':
-                # -- one vs. all
-                raise NotImplementedError(method)
+                # -- Crammer & Singer multi-class
+                C = 1.0 / (l2_regularization * len(X))
+                svm = sklearn.svm.LinearSVC(
+                        C=C,
+                        scale_C=False,
+                        multi_class=True,
+                        **method_kwargs)
+                svm.fit(X, y)
 
             else:
                 raise ValueError('unrecognized method', method)

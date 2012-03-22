@@ -22,10 +22,10 @@ DEFAULT_KWARGS = dict(sgd_step_size0=1e-3,
                       dtype=np.float32)
 
 
-def get_fake_data(n_points, n_features, rstate):
+def get_fake_data(n_points, n_features, rstate, separation=1e-1):
     X = rstate.randn(n_points, n_features).astype(np.float32)
     y = 2 * (rstate.randn(n_points) > 0) - 1
-    X[y == 1] += 1e-1
+    X[y == 1] += separation
     return X, y
 
 

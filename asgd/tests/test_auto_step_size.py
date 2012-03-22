@@ -1,4 +1,5 @@
 from nose.tools import assert_equal
+import numpy as np
 from numpy.testing import assert_almost_equal
 from numpy.testing import assert_array_equal
 
@@ -13,7 +14,7 @@ from test_naive_asgd import get_fake_data
 
 def get_new_model(n_features, rstate, n_points):
     return BinaryASGD(n_features, rstate=rstate,
-            sgd_step_size0=1e3,
+            sgd_step_size0=1e3,  #  intentionally large, binary_fit will fix
             l2_regularization=1e-3,
             max_observations=5 * n_points,
             min_observations=5 * n_points,
@@ -27,13 +28,9 @@ def test_binary_sgd_step_size0():
     X, y = get_fake_data(100, n_features, rstate)
 
     clf = get_new_model(n_features, rstate, 100)
-    best0 = find_sgd_step_size0(clf, (X, y), (.25, .5), tolerance=1e-6)
-
-    # start a little lower, still works
-    best1 = find_sgd_step_size0(clf, (X, y), (.125, .25), tolerance=1e-6)
-    print best0, best1
-    assert_almost_equal(best0, 0.03501, decimal=4)
-    assert_almost_equal(best1, 0.03501, decimal=4)
+    best0 = find_sgd_step_size0(clf, (X, y))
+    print best0
+    assert np.allclose(best0, 0.04, atol=.1, rtol=.5)
 
     # find_sgd_step_size0 does not change clf
     assert clf.sgd_step_size0 == 1000.0
@@ -43,25 +40,15 @@ def test_binary_fit():
     rstate = RandomState(42)
     n_features = 20
 
-    clf100 = get_new_model(n_features, rstate, 100)
-    X, y = get_fake_data(100, n_features, rstate)
-    _clf100 = binary_fit(clf100, (X, y))
-    assert _clf100 is clf100
-    assert_almost_equal(clf100.sgd_step_size0, 0.00954, decimal=4)
+    for L in [100, DEFAULT_MAX_EXAMPLES, int(DEFAULT_MAX_EXAMPLES * 1.5),
+            int(DEFAULT_MAX_EXAMPLES * 3)]:
 
-    # smoke test
-    clf1000 = get_new_model(n_features, rstate, 1000)
-    X, y = get_fake_data(DEFAULT_MAX_EXAMPLES, n_features, rstate)
-    _clf1000 = binary_fit(clf1000, (X, y))
-    assert _clf1000 is clf1000
-    assert_almost_equal(clf1000.sgd_step_size0, 0.00201, decimal=4)
-
-    # smoke test that at least it runs
-    clf2000 = get_new_model(n_features, rstate, 2000)
-    X, y = get_fake_data(2000, n_features, rstate)
-    _clf2000 = binary_fit(clf2000, (X, y))
-    assert _clf2000 == clf2000
-    assert_almost_equal(clf2000.sgd_step_size0, 0.001498, decimal=4)
+        clf = get_new_model(n_features, rstate, L)
+        X, y = get_fake_data(L, n_features, rstate, separation=0.1)
+        best = find_sgd_step_size0(clf, (X, y))
+        _clf = binary_fit(clf, (X, y))
+        assert _clf is clf
+        assert 0 < clf.sgd_step_size0 <= best
 
 
 def test_fit_replicable():

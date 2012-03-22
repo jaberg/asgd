@@ -30,7 +30,7 @@ def find_sgd_step_size0(
     -------
         Optimal sgd_step_size0 given `X` and `y`.
     """
-    # -- stupid scipy calls some sizes twice!?
+    # -- stupid solver calls some sizes twice!?
     _cache = {}
 
     def eval_size0(log2_size0):
@@ -52,18 +52,37 @@ def find_sgd_step_size0(
         rval = other.cost(X, y)
         if np.isnan(rval):
             rval = float('inf')
-        #print 'find step %e: %e' % (current_step_size, rval)
+        logger.info('find step %e: %e' % (current_step_size, rval))
+        _cache[float(log2_size0)] = rval
         return rval
 
-    log2_best_sgd_step_size0 = scipy.optimize.fmin(
-            eval_size0,
-            x0=np.log2(model.sgd_step_size0),
-            xtol=tolerance,
-            )
+    if tolerance < 0.5:
+        raise NotImplementedError(
+                'tolerance too small, need adaptive stepsize')
 
-    #print 'Brent came back with', log2_best_sgd_step_size0, 2 ** log2_best_sgd_step_size0
+    step = -tolerance
+    x0 = np.log2(model.sgd_step_size0)
+    x1 = np.log2(model.sgd_step_size0) + step
+    y0 = eval_size0(x0)
+    y1 = eval_size0(x1)
+    if y1 > y0:
+        step *= -1
+        y0, y1 = y1, y0
 
-    rval = 2.0 ** log2_best_sgd_step_size0
+    while y1 < y0:
+        x0, y0 = x1, y1
+        x1 = x0 + step
+        y1 = eval_size0(x1)
+
+    # I tried using sp.optimize.fmin, but this function is bumpy and we only
+    # want a really coarse estimate of the optimmum, so fmin and fmin_powell
+    # end up being relatively inefficient even compared to this really stupid
+    # search.
+    #
+    # TODO: increase the stepsize every time it still goes down, and then
+    #       backtrack when we over-step
+
+    rval = 2.0 ** x0
     return rval
 
 
@@ -77,7 +96,7 @@ def binary_fit(
 
     Parameters
     ----------
-    model: BinaryASGD
+    model: BaseASGD instance
         Instance of the model to be fitted.
 
     fit_args - tuple of args to model.fit
@@ -90,12 +109,11 @@ def binary_fit(
 
     Returns
     -------
-    model: BinaryASGD
-        Instances of the model, fitted with an estimate of the best
-        sgd_step_size0
+    model: model, fitted with an estimate of the best sgd_step_size0
     """
 
     assert max_examples > 0
+    logger.info('binary_fit: design matrix shape %s' % str(fit_args[0].shape))
 
     # randomly choose up to max_examples uniformly without replacement from
     # across the whole set of training data.
@@ -111,8 +129,7 @@ def binary_fit(
 
     # Heuristic: take the best stepsize according to the first max_examples,
     # and go half that fast for the full run.
-    stepdown = np.sqrt( float(len(all_idxs)) / float(len(idxs)))
-    step_size0 = max(best / stepdown, step_size_floor)
+    step_size0 = max(best / 2.0, step_size_floor)
 
     logger.info('setting sgd_step_size: %e' % step_size0)
     model.sgd_step_size0 = float(step_size0)
