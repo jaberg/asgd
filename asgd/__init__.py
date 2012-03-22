@@ -7,15 +7,12 @@ OVAASGD algorithm, as defined in naive_asgd.
 """
 
 # naive_asgd defines reference implementations
-from naive_asgd import NaiveBinaryASGD, NaiveOVAASGD
-BinaryASGD = NaiveBinaryASGD
-NaiveOVAASGD = NaiveOVAASGD
 
-# theano_asgd requires theano, provides faster implementations than naive_asgd.
-try:
-    from theano_asgd import TheanoBinaryASGD
-    BinaryASGD = TheanoBinaryASGD
-except ImportError:
-    pass
+from naive_asgd import NaiveBinaryASGD
+from naive_asgd import NaiveOVAASGD
+from naive_asgd import NaiveRankASGD
+from naive_asgd import SparseUpdateRankASGD
 
 from experimental_asgd import ExperimentalBinaryASGD
+
+from linsvm import LinearSVM
