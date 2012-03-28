@@ -91,7 +91,7 @@ class LinearSVM(object):
                         set(y))
             if solver == 'auto':
                 solver = ('asgd.SparseUpdateRankASGD', {
-                        'sgd_step_size0': 10.0 / X.shape[1],
+                        'sgd_step_size0': 0.01,
                         })
 
             method, method_kwargs = solver
