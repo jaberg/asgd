@@ -2,11 +2,7 @@
 import numpy as np
 
 def mean_and_std(X, min_std):
-    # XXX: this loop is more memory efficient than numpy but not as
-    # numerically accurate. It would be better to look at the train_mean,
-    # and then either use the msq for getting unit norms if the train_means
-    # are small-ish, or else use numpy.std if the mean is large enough to
-    # cause numerical trouble
+    # XXX: REPLACE THIS WITH eccv12/utils.mean_and_std
     m = np.zeros(X.shape[1], dtype='float64')
     msq = np.zeros(X.shape[1], dtype='float64')
     for i in xrange(X.shape[0]):

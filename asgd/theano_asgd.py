@@ -3,12 +3,10 @@ import numpy as np
 from itertools import izip
 
 from naive_asgd import BaseASGD
-from naive_asgd import DetermineStepSizeMixin
 
 from naive_asgd import (
         DEFAULT_SGD_STEP_SIZE0,
         DEFAULT_L2_REGULARIZATION,
-        DEFAULT_N_ITERATIONS,
         DEFAULT_FEEDBACK,
         DEFAULT_RSTATE,
         DEFAULT_DTYPE,
@@ -20,7 +18,7 @@ import theano.ifelse
 import theano.tensor as tensor
 
 
-class TheanoBinaryASGD(BaseASGD, DetermineStepSizeMixin):
+class TheanoBinaryASGD(object):
 
     """
     Notes regarding speed:
@@ -62,7 +60,6 @@ class TheanoBinaryASGD(BaseASGD, DetermineStepSizeMixin):
     def __init__(self, n_features,
             sgd_step_size0=DEFAULT_SGD_STEP_SIZE0,
             l2_regularization=DEFAULT_L2_REGULARIZATION,
-            n_iterations=DEFAULT_N_ITERATIONS,
             feedback=DEFAULT_FEEDBACK,
             rstate=DEFAULT_RSTATE,
             dtype=DEFAULT_DTYPE,
@@ -295,3 +292,32 @@ class TheanoBinaryASGD(BaseASGD, DetermineStepSizeMixin):
         self.asgd_bias = self.asgd_bias * 0
         self.sgd_weights = self.sgd_weights * 0
         self.sgd_bias = self.sgd_bias * 0
+
+
+
+class TheanoOVAPartialFit(object):
+    def __init__(self, n_features, n_classes, l2_penalty, dtype):
+
+        X = tensor.matrix(dtype=dtype)
+        yvecs = tensor.matrix(dtype=dtype)
+        sgd_params = tensor.vector(dtype=dtype)
+
+        flat_sgd_weights = sgd_params[:n_features * n_classes]
+        sgd_weights = flat_sgd_weights.reshape((n_features, n_classes))
+        sgd_bias = sgd_params[n_features * n_classes:]
+
+        margin = yvecs * (tensor.dot(X, sgd_weights) + sgd_bias)
+        losses = tensor.maximum(0, 1 - margin) ** 2
+        l2_cost = .5 * l2_penalty * tensor.dot(
+                flat_sgd_weights, flat_sgd_weights)
+
+        cost = losses.mean(axis=0).sum() + l2_cost
+        dcost_dparams = tensor.grad(cost, sgd_params)
+
+        self.fn = theano.function([sgd_params, X, yvecs],
+                [cost, dcost_dparams])
+
+    def __call__(self, p, x, y):
+        c, d = self.fn(p.astype('float32'), x, y)
+        return c.astype('float64'), d.astype('float64')
+

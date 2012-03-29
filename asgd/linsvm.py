@@ -7,6 +7,7 @@ import numpy as np
 
 from .auto_step_size import binary_fit
 from .naive_asgd import NaiveBinaryASGD
+from .naive_asgd import NaiveOVAASGD
 from .naive_asgd import NaiveRankASGD
 from .naive_asgd import SparseUpdateRankASGD
 
@@ -99,27 +100,43 @@ class LinearSVM(object):
             if method == 'asgd.NaiveRankASGD':
                 method_kwargs = dict(method_kwargs)
                 method_kwargs.setdefault('rstate', np.random.RandomState(123))
+                auto_step_size0 = method_kwargs.pop('auto_step_size0', True)
+                auto_max_examples = method_kwargs.pop('auto_max_examples', 1000)
                 svm = NaiveRankASGD(n_classes, n_feats,
                         l2_regularization=l2_regularization,
                         **method_kwargs)
-                svm = binary_fit(svm, (X, y))
+                if auto_step_size0:
+                    svm = binary_fit(svm, (X, y),
+                            max_examples=auto_max_examples)
+                else:
+                    svm.fit(X, y)
 
             elif method == 'asgd.SparseUpdateRankASGD':
                 method_kwargs = dict(method_kwargs)
                 method_kwargs.setdefault('rstate', np.random.RandomState(123))
+                auto_step_size0 = method_kwargs.pop('auto_step_size0', True)
                 svm = SparseUpdateRankASGD(n_classes, n_feats,
                         l2_regularization=l2_regularization,
                         **method_kwargs)
-                svm = binary_fit(svm, (X, y))
+                if auto_step_size0:
+                    svm = binary_fit(svm, (X, y))
+                else:
+                    svm.fit(X, y)
 
             elif method == 'asgd.NaiveOVAASGD':
                 # -- one vs. all
                 method_kwargs = dict(method_kwargs)
                 method_kwargs.setdefault('rstate', np.random.RandomState(123))
+                auto_step_size0 = method_kwargs.pop('auto_step_size0', True)
+                auto_max_examples = method_kwargs.pop('auto_max_examples', 1000)
                 svm = NaiveOVAASGD(n_classes, n_feats,
                         l2_regularization=l2_regularization,
                         **method_kwargs)
-                svm = binary_fit(svm, (X, y))
+                if auto_step_size0:
+                    svm = binary_fit(svm, (X, y),
+                            max_examples=auto_max_examples)
+                else:
+                    svm.fit(X, y)
 
             elif method == 'sklearn.svm.SVC':
                 # -- one vs. one

@@ -6,7 +6,9 @@ naive, non-optimized implementation
 import copy
 from itertools import izip
 import sys
+import time
 
+import scipy.linalg
 import numpy as np
 from numpy import dot
 
@@ -25,11 +27,106 @@ DEFAULT_FIT_ABS_TOLERANCE = 1e-4
 DEFAULT_FIT_REL_TOLERANCE = 1e-2
 DEFAULT_SGD_EXPONENT = 2.0 / 3.0
 DEFAULT_SGD_TIMESCALE = 'l2_regularization'
+DEFAULT_FIT_VERBOSE = False
 # can be 'l2_regularization' or float
 # This timescale default comes from [1] in which it is introduced as a
 # heuristic.
 # [1] http://www.dbs.ifi.lmu.de/~yu_k/cvpr11_0694.pdf
 # Update: it is also recommended in Leon Bottou's SvmAsgd software.
+
+DEFAULT_COST_FN = 'Hinge'
+
+import line_profiler
+if 0:
+    profile = line_profiler.LineProfiler()
+else:
+    class DummyProfile(object):
+        def print_stats(self):
+            pass
+
+        def __call__(self, f):
+            return f
+    profile = DummyProfile()
+
+
+def assert_allclose(a, b, rtol=1e-05, atol=1e-08):
+    if not np.allclose(a, b, rtol=rtol, atol=atol):
+        adiff = abs(a - b).max(),
+        rdiff = (abs(a - b) / (abs(a) + abs(b) + 1e-15)).max()
+        raise ValueError('not close enough', (adiff, rdiff, {
+            'amax': a.max(),
+            'bmax': b.max(),
+            'amin': a.min(),
+            'bmin': b.min(),
+            'asum': a.sum(),
+            'bsum': b.sum(),
+            }))
+
+
+class MarginLoss(object):
+    pass
+
+
+class Hinge(MarginLoss):
+
+    @staticmethod
+    def f(margin):
+        margin = np.asarray(margin)
+        return np.maximum(0, 1 - margin)
+
+    @staticmethod
+    def df(margin):
+        margin = np.asarray(margin)
+        return -1.0 * (margin < 1)
+
+
+class L2Half(MarginLoss):
+
+    @staticmethod
+    def f(margin):
+        margin = np.asarray(margin)
+        return np.maximum(0, 1 - margin) ** 2
+
+    @staticmethod
+    def df(margin):
+        margin = np.asarray(margin)
+        return 2 * np.minimum(0, margin - 1)
+
+
+class L2Huber(MarginLoss):
+
+    @staticmethod
+    def f(margin):
+        margin = np.asarray(margin)
+        if margin.ndim > 0:
+            return np.piecewise(margin,
+                    [margin < -1, (-1 <= margin) & (margin < 1), 1 <= margin],
+                    [lambda x: -4. * x, lambda x: (1 - x) ** 2, 0.])
+        else:
+            if margin < -1: return -4. * margin
+            if margin < 1: return (1 - margin) ** 2
+            return 0.0
+
+    @staticmethod
+    def df(margin):
+        return np.clip(2 * (margin - 1), -4, 0)
+
+
+def loss_obj(obj):
+    """
+    Factory method turning `obj` into a MarginLoss either by pass-through or
+    name lookup.
+    """
+    if isinstance(obj, basestring):
+        _obj = globals()[obj]
+    else:
+        _obj = obj
+    print obj, _obj
+    if not (isinstance(_obj, MarginLoss) or issubclass(_obj, MarginLoss)):
+        raise TypeError('object does not name a loss function',
+                obj)
+    return _obj
+
 
 
 class BaseASGD(object):
@@ -47,9 +144,12 @@ class BaseASGD(object):
                  fit_n_partial=DEFAULT_N_PARTIAL,
                  fit_abs_tolerance=DEFAULT_FIT_ABS_TOLERANCE,
                  fit_rel_tolerance=DEFAULT_FIT_REL_TOLERANCE,
+                 fit_verbose=DEFAULT_FIT_VERBOSE,
                  feedback=DEFAULT_FEEDBACK,
                  rstate=DEFAULT_RSTATE,
-                 dtype=DEFAULT_DTYPE):
+                 dtype=DEFAULT_DTYPE,
+                 cost_fn=DEFAULT_COST_FN,
+                 ):
 
         # --
         assert n_features > 1
@@ -64,6 +164,9 @@ class BaseASGD(object):
         self.fit_n_partial = fit_n_partial
         self.fit_abs_tolerance = fit_abs_tolerance
         self.fit_rel_tolerance = fit_rel_tolerance
+        self.fit_verbose = fit_verbose
+
+        self.cost_fn = loss_obj(cost_fn)
 
         if feedback:
             raise NotImplementedError("FIXME: feedback support is buggy")
@@ -92,6 +195,8 @@ class BaseASGD(object):
         self.n_observations = 0
         self.asgd_step_size0 = 1
         self.asgd_step_size = self.asgd_step_size0
+        self.asgd_start = 0
+
         self.sgd_step_size = self.sgd_step_size0
         self.train_means = []
         self.recent_train_costs = []
@@ -110,6 +215,9 @@ class BaseASGD(object):
         rtol = self.fit_rel_tolerance
         atol = self.fit_abs_tolerance
 
+        if self.fit_verbose:
+            print 'fit_converged:', len(train_means), train_means[-1]
+
         # -- check for perfect fit
         if len(train_means) > 1:
             assert np.min(train_means) >= 0
@@ -117,10 +225,10 @@ class BaseASGD(object):
                 return True
 
         # -- check for stall condition
-        if len(train_means) > 2:
+        if len(train_means) > 10:
             old_pt = max(
                     len(train_means) // 2,
-                    len(train_means) - 4)
+                    len(train_means) - 10)
             thresh = (1 - rtol) * train_means[old_pt] - atol
             if train_means[-1] > thresh:
                 return True
@@ -144,10 +252,12 @@ class BaseASGD(object):
             # then check for convergence
             fit_n_partial = min(n_points_remaining, self.fit_n_partial)
 
-            idx = self.rstate.permutation(n_points)
-            Xb = X[idx[:fit_n_partial]]
-            yb = y[idx[:fit_n_partial]]
-            self.partial_fit(Xb, yb)
+            all_idxs = self.rstate.permutation(n_points)
+            idxs = all_idxs[:fit_n_partial]
+            if hasattr(self, 'partial_fit_by_index'):
+                self.partial_fit_by_index(idxs, X, y)
+            else:
+                self.partial_fit(X[idxs], y[idxs])
 
             if self.feedback:
                 raise NotImplementedError(
@@ -159,7 +269,7 @@ class BaseASGD(object):
                     and self.fit_converged()):
                 break
 
-            n_points_remaining -= len(Xb)
+            n_points_remaining -= len(idxs)
 
         return self
 
@@ -172,7 +282,6 @@ class BaseASGD(object):
             return mu, stderr
         else:
             return mu
-
 
 
 class BaseBinaryASGD(BaseASGD):
@@ -198,8 +307,8 @@ class BaseBinaryASGD(BaseASGD):
         bias = self.asgd_bias
         margin = y * (np.dot(X, weights) + bias)
         l2_cost = self.l2_regularization * (weights ** 2).sum()
-        hinge_loss = np.maximum(0, 1 - margin)
-        rval = hinge_loss.mean() + l2_cost
+        loss = self.cost_fn.f(margin)
+        rval = loss.mean() + l2_cost
         return rval
 
 
@@ -207,6 +316,9 @@ class NaiveBinaryASGD(BaseBinaryASGD):
 
     def partial_fit(self, X, y):
         assert np.all(y ** 2 == 1)  # make sure labels are +-1
+
+        if self.cost_fn.f != Hinge.f:
+            raise NotImplementedError('Naive Binary requires hinge loss')
 
         sgd_step_size0 = self.sgd_step_size0
         sgd_step_size = self.sgd_step_size
@@ -304,10 +416,28 @@ class BaseMultiASGD(BaseASGD):
         return self.decision_function(X).argmax(axis=1)
 
 
-class NaiveOVAASGD(BaseMultiASGD):
+class OVAASGD(BaseMultiASGD):
+    def cost(self, X, y):
+        weights = self.asgd_weights
+        bias = self.asgd_bias
+        targets = (y[:, None] == np.arange(self.n_classes)) * 2 - 1
+        margin = targets * (dot(np.asarray(X), weights) + bias)
+        losses = self.cost_fn.f(margin)
+        flat_weights = weights.flatten()
+        l2_term = np.dot(flat_weights, flat_weights)
+        #l2_term += np.dot(bias, bias)
+        l2_cost = .5 * self.l2_regularization * l2_term
+        rval = losses.mean() + l2_cost
+        return rval
 
+
+class NaiveOVAASGD(OVAASGD):
     def partial_fit(self, X, y):
+        return self.partial_fit_by_index(range(len(X)), X, y)
 
+    @profile
+    def partial_fit_by_index(self, idxs, X, y):
+        ttt = time.time()
         if set(y) > set(range(self.n_classes)):
             raise ValueError("Invalid 'y'")
 
@@ -317,51 +447,71 @@ class NaiveOVAASGD(BaseMultiASGD):
                 self.sgd_step_size_scheduling_exponent
         sgd_step_size_scheduling_multiplier = \
                 self.sgd_step_size_scheduling_multiplier
-        sgd_weights = self.sgd_weights
+        sgd_weights = np.asarray(self.sgd_weights, order='F')
         sgd_bias = self.sgd_bias
 
-        asgd_weights = self.asgd_weights
+        asgd_weights = np.asarray(self.asgd_weights, order='F')
         asgd_bias = self.asgd_bias
         asgd_step_size = self.asgd_step_size
+        asgd_start = self.asgd_start
 
         l2_regularization = self.l2_regularization
 
         n_observations = self.n_observations
         n_classes = self.n_classes
+        n_features = asgd_weights.shape[0]
 
         train_means = self.train_means
+        dtype = self.dtype
         recent_train_costs = self.recent_train_costs
 
-        for obs, label in izip(X, y):
-            label = 2 * (np.arange(n_classes) == label).astype(int) - 1
+        scal, axpy, gemv, gemm = scipy.linalg.blas.get_blas_funcs(
+                ['scal', 'axpy', 'gemv', 'gemm'],
+                (asgd_weights,))
+
+        for idx in idxs:
+            obs = X[idx].astype(dtype)
+            yvec = -np.ones(n_classes, dtype=dtype)
+            yvec[y[idx]] = 1
 
             # -- compute margin
-            margin = label * (dot(obs, sgd_weights) + sgd_bias)
+            margin = yvec * gemv(alpha=1, a=sgd_weights, trans=1, x=obs,
+                    beta=1.0, y=sgd_bias, overwrite_y=0,)
+            #margin = yvec * (dot(obs, sgd_weights) + sgd_bias)
+            #assert_allclose(margin, margin_)
+            if asgd_start:
+                asgd_margin = yvec * gemv(alpha=1, a=asgd_weights, trans=1, x=obs,
+                        beta=1.0, y=asgd_bias, overwrite_y=0,)
+                asgd_costs = self.cost_fn.f(asgd_margin)
+                recent_train_costs.append(np.sum(asgd_costs))
+            else:
+                costs = self.cost_fn.f(margin)
+                recent_train_costs.append(np.sum(costs))
+
+            #asgd_margin = yvec * (dot(obs, asgd_weights) + asgd_bias)
+            #assert_allclose(asgd_margin, asgd_margin_)
 
             # -- update sgd
-            if l2_regularization:
-                sgd_weights *= (1 - l2_regularization * sgd_step_size)
+            grad = self.cost_fn.df(margin) * yvec
 
-            violations = margin < 1
-
-            if np.any(violations):
-                label_violated = label[violations]
-                sgd_weights[:, violations] += (
-                    sgd_step_size
-                    * label_violated[np.newaxis, :]
-                    * obs[:, np.newaxis]
-                )
-                sgd_bias[violations] += sgd_step_size * label_violated
-                recent_train_costs.append(
-                        n_classes - margin[violations].sum())
-            else:
-                recent_train_costs.append(0.0)
+            sgd_weights = gemm(
+                    alpha=-sgd_step_size,
+                    a=obs[:,None],
+                    b=grad[None,:],
+                    beta=1 - l2_regularization * sgd_step_size,
+                    c=sgd_weights,
+                    overwrite_c=1)
+            sgd_bias = axpy(
+                    a=-sgd_step_size,
+                    x=grad,
+                    y=sgd_bias)
 
             # -- update asgd
-            asgd_weights = (1 - asgd_step_size) * asgd_weights \
-                    + asgd_step_size * sgd_weights
-            asgd_bias = (1 - asgd_step_size) * asgd_bias \
-                    + asgd_step_size * sgd_bias
+            if asgd_start:
+                asgd_weights = axpy(a=asgd_step_size, x=sgd_weights,
+                        y=scal(1 - asgd_step_size, asgd_weights))
+                asgd_bias = axpy(a=asgd_step_size, x=sgd_bias,
+                        y=scal(1 - asgd_step_size, asgd_bias))
 
             # -- update step_sizes
             n_observations += 1
@@ -370,13 +520,35 @@ class NaiveOVAASGD(BaseMultiASGD):
             sgd_step_size = sgd_step_size0 / \
                     (sgd_step_size_scheduling ** \
                      sgd_step_size_scheduling_exponent)
-            asgd_step_size = 1. / n_observations
+
+            if asgd_start:
+                asgd_step_size = 1. / max(1, n_observations - asgd_start)
+            else:
+                asgd_step_size = 1.
 
             if len(recent_train_costs) == self.fit_n_partial:
+                if asgd_start:
+                    weights = asgd_weights
+                else:
+                    weights = sgd_weights
+                l2_term = np.dot(weights.flatten(), weights.flatten())
                 train_means.append(np.mean(recent_train_costs)
-                        + l2_regularization * np.dot(
-                            self.asgd_weights, self.asgd_weights))
+                        + .5 * l2_regularization * l2_term)
+                asgd_min_observations = 100000 # XXX
+                if (asgd_start == 0 and
+                        n_observations > (
+                            self.min_observations - asgd_min_observations)):
+                    asgd_start = n_observations
+                if self.fit_verbose:
+                    print 'train_mean', train_means[-1]
+                    print 'l2_term', l2_term
+                    print 'asgd_step_size', asgd_step_size
+                # -- reset counter
                 self.recent_train_costs = recent_train_costs = []
+
+        if not asgd_start:
+            asgd_weights = sgd_weights.copy()
+            asgd_bias = sgd_bias.copy()
 
         # --
         self.sgd_weights = sgd_weights
@@ -386,13 +558,39 @@ class NaiveOVAASGD(BaseMultiASGD):
         self.asgd_weights = asgd_weights
         self.asgd_bias = asgd_bias
         self.asgd_step_size = asgd_step_size
+        self.asgd_start = asgd_start
 
         self.n_observations = n_observations
+
+        if self.fit_verbose:
+            n_idx_per_sec = len(idxs) / (time.time() - ttt)
+            print '%i observations at %f/sec' % (
+                    n_observations, n_idx_per_sec)
+        profile.print_stats()
 
         return self
 
 
-class NaiveRankASGD(BaseMultiASGD):
+class RankASGD(BaseMultiASGD):
+    def cost(self, X, y):
+        weights = self.asgd_weights
+        bias = self.asgd_bias
+        decisions = dot(np.asarray(X), weights) + bias
+        margins = []
+        for decision, label in zip(decisions, y):
+            dsrt = np.argsort(decision)
+            distractor = dsrt[-2] if dsrt[-1] == label else dsrt[-1]
+            margin = decision[label] - decision[distractor]
+            margins.append(margin)
+
+        flat_weights = weights.flatten()
+        l2_term = np.dot(flat_weights, flat_weights)
+        l2_cost = self.l2_regularization * l2_term
+        rval = self.cost_fn.f(margins).mean() + l2_cost
+        return rval
+
+
+class NaiveRankASGD(RankASGD):
     """
     Implements rank-based multiclass SVM.
     """
@@ -400,6 +598,10 @@ class NaiveRankASGD(BaseMultiASGD):
     def partial_fit(self, X, y):
         if set(y) > set(range(self.n_classes)):
             raise ValueError("Invalid 'y'")
+
+        if self.cost_fn.f != Hinge.f:
+            raise NotImplementedError('%s requires hinge loss' %
+                    self.__class__.__name__)
 
         sgd_step_size0 = self.sgd_step_size0
         sgd_step_size = self.sgd_step_size
@@ -458,13 +660,19 @@ class NaiveRankASGD(BaseMultiASGD):
             sgd_step_size = sgd_step_size0 / \
                     (sgd_step_size_scheduling ** \
                      sgd_step_size_scheduling_exponent)
-            asgd_step_size = 1. / n_observations
+
+            asgd_start = self.min_observations // 2
+            if n_observations <= asgd_start:
+                asgd_step_size = 1.
+            else:
+                asgd_step_size = 1. / (n_observations - asgd_start)
 
             if len(recent_train_costs) == self.fit_n_partial:
                 flat_weights = asgd_weights.flatten()
                 l2_term = np.dot(flat_weights, flat_weights)
+                l2_term += np.dot(asgd_bias, asgd_bias)
                 train_means.append(np.mean(recent_train_costs)
-                        + l2_regularization * l2_term)
+                        + .5 * l2_regularization * l2_term)
                 self.recent_train_costs = recent_train_costs = []
 
         # --
@@ -479,28 +687,6 @@ class NaiveRankASGD(BaseMultiASGD):
         self.n_observations = n_observations
 
         return self
-
-    def cost(self, X, y):
-        weights = self.asgd_weights
-        bias = self.asgd_bias
-        decisions = dot(np.asarray(X), weights) + bias
-        margins = []
-        for decision, label in zip(decisions, y):
-            dsrt = np.argsort(decision)
-            distractor = dsrt[-2] if dsrt[-1] == label else dsrt[-1]
-            margin = decision[label] - decision[distractor]
-            margins.append(margin)
-
-        flat_weights = weights.flatten()
-        l2_term = np.dot(flat_weights, flat_weights)
-        l2_cost = self.l2_regularization * l2_term
-        rval = np.maximum(0, 1 - np.asarray(margins)).mean() + l2_cost
-        return rval
-
-
-#import line_profiler
-#profile = line_profiler.LineProfiler()
-#import time
 
 
 class SparseUpdateRankASGD(BaseMultiASGD):
@@ -517,7 +703,7 @@ class SparseUpdateRankASGD(BaseMultiASGD):
     def partial_fit(self, X, y):
         if set(y) > set(range(self.n_classes)):
             raise ValueError("Invalid 'y'")
-        #ttt = time.time()
+        ttt = time.time()
 
         sgd_step_size0 = self.sgd_step_size0
         sgd_step_size = self.sgd_step_size
@@ -525,9 +711,11 @@ class SparseUpdateRankASGD(BaseMultiASGD):
                 self.sgd_step_size_scheduling_exponent
         sgd_step_size_scheduling_multiplier = \
                 self.sgd_step_size_scheduling_multiplier
+        # -- Fortran order is faster, and required for axpy
         sgd_weights = np.asarray(self.sgd_weights, order='F')
         sgd_bias = self.sgd_bias
 
+        # -- Fortran order is faster, and required for axpy
         asgd_weights = np.asarray(self.asgd_weights, order='F')
         asgd_bias = self.asgd_bias
         asgd_step_size = self.asgd_step_size
@@ -536,6 +724,7 @@ class SparseUpdateRankASGD(BaseMultiASGD):
 
         n_observations = self.n_observations
         n_classes = self.n_classes
+        n_features = asgd_weights.shape[0]
 
         train_means = self.train_means
         recent_train_costs = self.recent_train_costs
@@ -551,10 +740,26 @@ class SparseUpdateRankASGD(BaseMultiASGD):
             asgd_scale = np.ones((n_classes, 2), dtype=asgd_weights.dtype)
             asgd_scale[:, 1] = 0  # -- originally there is no sgd contribution
 
+        scal, axpy, gemv = scipy.linalg.blas.get_blas_funcs(
+                ['scal', 'axpy', 'gemv'],
+                (asgd_weights,))
+
         for obs, label in izip(X, y):
+            obs = obs.astype(sgd_weights.dtype)
+
+            #print sgd_weights.shape, sgd_weights.strides
+            #print asgd_weights.shape, asgd_weights.strides
 
             # -- compute margin
-            decision = sgd_weights_scale * dot(obs, sgd_weights) + sgd_bias
+            decision = gemv(
+                    alpha=sgd_weights_scale,
+                    a=sgd_weights,
+                    trans=1,
+                    x=obs,
+                    y=sgd_bias,
+                    beta=1.0,
+                    overwrite_y=0,
+                    )
 
             dsrt = np.argsort(decision)
             distractor = dsrt[-2] if dsrt[-1] == label else dsrt[-1]
@@ -563,32 +768,53 @@ class SparseUpdateRankASGD(BaseMultiASGD):
             # -- update sgd
             sgd_weights_scale *= 1 - l2_regularization * sgd_step_size
 
-            if margin < 1:
+            cost = self.cost_fn.f(margin)
+            grad = self.cost_fn.df(margin)
+
+            if grad:
                 # -- perform the delayed updates to the rows of asgd
 
                 if use_asgd_scale:
                     # -- XXX: this should be a single BLAS call to axpy
-                    asgd_weights[:, distractor] *= asgd_scale[distractor, 0]
-                    asgd_weights[:, distractor] += \
-                            (asgd_scale[distractor, 1] * sgd_weights_scale) \
-                            * sgd_weights[:, distractor]
-                    asgd_scale[distractor] = [1, 0]
+                    for idx in [distractor, label]:
+                        scal(
+                                a=asgd_scale[idx, 0],
+                                x=asgd_weights,
+                                n=n_features,
+                                offx=idx * n_features)
+                        axpy(
+                                a=(asgd_scale[idx, 1] *
+                                    sgd_weights_scale),
+                                x=sgd_weights,
+                                y=asgd_weights,
+                                offx=idx * n_features,
+                                offy=idx * n_features,
+                                n=n_features)
+                        asgd_scale[idx, 0] = 1
+                        asgd_scale[idx, 1] = 0
 
-                    # -- XXX: this should be a single BLAS call to axpy
-                    asgd_weights[:, label] *= asgd_scale[label, 0]
-                    asgd_weights[:, label] += \
-                            (asgd_scale[label, 1] * sgd_weights_scale)\
-                            * sgd_weights[:, label]
-                    asgd_scale[label] = [1, 0]
-
-                winc = (sgd_step_size / sgd_weights_scale) * obs
-                sgd_weights[:, distractor] -= winc
-                sgd_weights[:, label] += winc
-                sgd_bias[distractor] -= sgd_step_size
-                sgd_bias[label] += sgd_step_size
-                recent_train_costs.append(1 - float(margin))
+                step = grad * sgd_step_size / sgd_weights_scale
+                if 1:
+                    axpy(
+                            a=step,
+                            x=obs,
+                            y=sgd_weights,
+                            offy=distractor * n_features,
+                            n=n_features)
+                    axpy(
+                            a=-step,
+                            x=obs,
+                            y=sgd_weights,
+                            offy=label * n_features,
+                            n=n_features)
+                else:
+                    sgd_weights[:, distractor] += step * obs
+                    sgd_weights[:, label] -= step * obs
+                sgd_bias[distractor] += grad * sgd_step_size
+                sgd_bias[label] -= grad * sgd_step_size
+                recent_train_costs.append(cost)
             else:
-                recent_train_costs.append(0.0)
+                recent_train_costs.append(cost)
 
             if use_asgd_scale:
                 # -- update asgd via scale variables
@@ -608,10 +834,11 @@ class SparseUpdateRankASGD(BaseMultiASGD):
             sgd_step_size = sgd_step_size0 / \
                     (sgd_step_size_scheduling ** \
                      sgd_step_size_scheduling_exponent)
-            if n_observations <= self.fit_n_partial:
+            asgd_start = self.min_observations // 2
+            if n_observations <= asgd_start:
                 asgd_step_size = 1.
             else:
-                asgd_step_size = 1. / (n_observations - self.fit_n_partial)
+                asgd_step_size = 1. / (n_observations - asgd_start)
 
             if len(recent_train_costs) == self.fit_n_partial:
                 if use_asgd_scale:
@@ -620,8 +847,13 @@ class SparseUpdateRankASGD(BaseMultiASGD):
                     asgd_scale[:, 0] = 1
                     asgd_scale[:, 1] = 0
 
+                # -- Technically the stopping criterion should be based on
+                #    the loss incurred by the asgd weights
+                #    XXX: multiply entire minibatch by current asgd weights
+                #    it won't take long
                 flat_weights = asgd_weights.flatten()
                 l2_term = np.dot(flat_weights, flat_weights)
+                l2_term += np.dot(asgd_bias, asgd_bias)
                 train_means.append(np.mean(recent_train_costs)
                         + l2_regularization * l2_term)
                 self.recent_train_costs = recent_train_costs = []
@@ -644,23 +876,7 @@ class SparseUpdateRankASGD(BaseMultiASGD):
         self.n_observations = n_observations
 
         #profile.print_stats()
-        #print 'n_obs', n_observations, 'time/%i' % len(X), (time.time() - ttt)
+        if self.fit_verbose:
+            print 'n_obs', n_observations, 'time/%i' % len(X), (time.time() - ttt)
         return self
-
-    def cost(self, X, y):
-        weights = self.asgd_weights
-        bias = self.asgd_bias
-        decisions = dot(np.asarray(X), weights) + bias
-        margins = []
-        for decision, label in zip(decisions, y):
-            dsrt = np.argsort(decision)
-            distractor = dsrt[-2] if dsrt[-1] == label else dsrt[-1]
-            margin = decision[label] - decision[distractor]
-            margins.append(margin)
-
-        flat_weights = weights.flatten()
-        l2_term = np.dot(flat_weights, flat_weights)
-        l2_cost = self.l2_regularization * l2_term
-        rval = np.maximum(0, 1 - np.asarray(margins)).mean() + l2_cost
-        return rval
 

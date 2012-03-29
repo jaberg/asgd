@@ -45,8 +45,10 @@ def find_sgd_step_size0(
         other.partial_fit(*partial_fit_args)
         # Hack: asgd is lower variance than sgd, but it's tuned to work
         # well asymptotically, not after just a few examples
-        other.asgd_weights = .5 * (other.asgd_weights + other.sgd_weights)
-        other.asgd_bias = .5 * (other.asgd_bias + other.sgd_bias)
+        #other.asgd_weights = .5 * (other.asgd_weights + other.sgd_weights)
+        #other.asgd_bias = .5 * (other.asgd_bias + other.sgd_bias)
+        other.asgd_weights = other.sgd_weights
+        other.asgd_bias = other.sgd_bias
 
         X, y = partial_fit_args[:2]
         rval = other.cost(X, y)
@@ -60,6 +62,8 @@ def find_sgd_step_size0(
         raise NotImplementedError(
                 'tolerance too small, need adaptive stepsize')
 
+    # N.B. we step downward first so that if both y0 == y1 == inf
+    #      we stay going downward
     step = -tolerance
     x0 = np.log2(model.sgd_step_size0)
     x1 = np.log2(model.sgd_step_size0) + step
@@ -68,10 +72,11 @@ def find_sgd_step_size0(
     if y1 > y0:
         step *= -1
         y0, y1 = y1, y0
+        x0, x1 = x1, x0
 
-    while y1 < y0:
+    while (y1 < y0) or (y1 == float('inf')):
         x0, y0 = x1, y1
-        x1 = x0 + step
+        x1 += step
         y1 = eval_size0(x1)
 
     # I tried using sp.optimize.fmin, but this function is bumpy and we only
