@@ -1,3 +1,34 @@
+ASGD (jaberg fork)
+==================
+
+This package provides several primal linear SVM solvers, which are appropriate
+for dense design matrices (feature matrices).  The main entry point for new users is
+the `asgd.LinearSVM` object which is a sklearn-compatible class that provides
+a somewhat uniform interface to various internal and external solvers.
+
+
+```
+
+import numpy as np
+
+# -- True model (w, b)
+w = np.random.randn(5)       # weights
+b = np.random.randn()        # bias
+
+# -- fake dataset (X, y)
+X = np.random.randn(100, 5)  # 100 fake 5-d examples
+y = np.sign(np.dot(X, w) + b)
+
+svm = asgd.LinearSVM(l2_regularization=0.01)
+svm.fit(X, y)
+print w, svm.svm.weights
+print b, svm.svm.bias
+print np.mean(svm.predict(X) == y)
+
+```
+
+
+
 References:
 ===========
 
