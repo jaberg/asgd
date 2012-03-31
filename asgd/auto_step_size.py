@@ -43,10 +43,6 @@ def find_sgd_step_size0(
         other.sgd_step_size0 = current_step_size
         other.sgd_step_size = current_step_size
         other.partial_fit(*partial_fit_args)
-        # Hack: asgd is lower variance than sgd, but it's tuned to work
-        # well asymptotically, not after just a few examples
-        #other.asgd_weights = .5 * (other.asgd_weights + other.sgd_weights)
-        #other.asgd_bias = .5 * (other.asgd_bias + other.sgd_bias)
         other.asgd_weights = other.sgd_weights
         other.asgd_bias = other.sgd_bias
 

@@ -8,11 +8,13 @@ OVAASGD algorithm, as defined in naive_asgd.
 
 # naive_asgd defines reference implementations
 
-from naive_asgd import NaiveBinaryASGD
-from naive_asgd import NaiveOVAASGD
-from naive_asgd import NaiveRankASGD
-from naive_asgd import SparseUpdateRankASGD
+from .naive_asgd import BinaryASGD
+from .naive_asgd import OneVsAllASGD
+from .naive_asgd import NaiveRankASGD
+from .naive_asgd import SparseUpdateRankASGD
 
-from experimental_asgd import ExperimentalBinaryASGD
+from .base import BinaryClassifier
+from .base import MultiClassifier
+from .base import classifier
 
-from linsvm import LinearSVM
+from .linsvm import LinearSVM

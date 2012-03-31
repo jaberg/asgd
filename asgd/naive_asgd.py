@@ -12,7 +12,13 @@ import scipy.linalg
 import numpy as np
 from numpy import dot
 
-from .utils import geometric_bracket_min
+
+from .base import BinaryClassifier
+from .base import MultiClassifier
+
+from .lossfns import loss_obj
+from .lossfns import Hinge
+
 
 DEFAULT_SGD_STEP_SIZE0 = None
 DEFAULT_L2_REGULARIZATION = 1e-3
@@ -63,70 +69,40 @@ def assert_allclose(a, b, rtol=1e-05, atol=1e-08):
             }))
 
 
-class MarginLoss(object):
-    pass
-
-
-class Hinge(MarginLoss):
-
-    @staticmethod
-    def f(margin):
-        margin = np.asarray(margin)
-        return np.maximum(0, 1 - margin)
-
-    @staticmethod
-    def df(margin):
-        margin = np.asarray(margin)
-        return -1.0 * (margin < 1)
-
-
-class L2Half(MarginLoss):
-
-    @staticmethod
-    def f(margin):
-        margin = np.asarray(margin)
-        return np.maximum(0, 1 - margin) ** 2
-
-    @staticmethod
-    def df(margin):
-        margin = np.asarray(margin)
-        return 2 * np.minimum(0, margin - 1)
-
-
-class L2Huber(MarginLoss):
-
-    @staticmethod
-    def f(margin):
-        margin = np.asarray(margin)
-        if margin.ndim > 0:
-            return np.piecewise(margin,
-                    [margin < -1, (-1 <= margin) & (margin < 1), 1 <= margin],
-                    [lambda x: -4. * x, lambda x: (1 - x) ** 2, 0.])
-        else:
-            if margin < -1: return -4. * margin
-            if margin < 1: return (1 - margin) ** 2
-            return 0.0
-
-    @staticmethod
-    def df(margin):
-        return np.clip(2 * (margin - 1), -4, 0)
-
-
-def loss_obj(obj):
+def fit_converged(train_means,
+        atol=DEFAULT_FIT_ABS_TOLERANCE,
+        rtol=DEFAULT_FIT_REL_TOLERANCE,
+        verbose=DEFAULT_FIT_VERBOSE):
     """
-    Factory method turning `obj` into a MarginLoss either by pass-through or
-    name lookup.
-    """
-    if isinstance(obj, basestring):
-        _obj = globals()[obj]
-    else:
-        _obj = obj
-    print obj, _obj
-    if not (isinstance(_obj, MarginLoss) or issubclass(_obj, MarginLoss)):
-        raise TypeError('object does not name a loss function',
-                obj)
-    return _obj
+    There are two convergence tests here. Training is considered to be
+    over if it has
 
+    * stalled: latest train_means is allclose to a previous one (*)
+
+    * terminated: latest train_means is allclose to 0
+
+    """
+
+    if verbose:
+        if train_means:
+            print 'fit_converged:', len(train_means), train_means[-1]
+
+    # -- check for perfect fit
+    if len(train_means) > 1:
+        assert np.min(train_means) >= 0
+        if np.allclose(train_means[-1], 0, atol=atol, rtol=rtol):
+            return True
+
+    # -- check for stall condition
+    if len(train_means) > 10:
+        old_pt = max(
+                len(train_means) // 2,
+                len(train_means) - 10)
+        thresh = (1 - rtol) * train_means[old_pt] - atol
+        if train_means[-1] > thresh:
+            return True
+
+    return False
 
 
 class BaseASGD(object):
@@ -134,22 +110,27 @@ class BaseASGD(object):
     XXX
     """
 
-    def __init__(self, n_features,
-                 sgd_step_size0=DEFAULT_SGD_STEP_SIZE0,
-                 l2_regularization=DEFAULT_L2_REGULARIZATION,
-                 sgd_step_size_scheduling_exponent = DEFAULT_SGD_EXPONENT,
-                 sgd_step_size_scheduling_multiplier = DEFAULT_SGD_TIMESCALE,
-                 min_observations=DEFAULT_MIN_OBSERVATIONS,
-                 max_observations=DEFAULT_MAX_OBSERVATIONS,
-                 fit_n_partial=DEFAULT_N_PARTIAL,
-                 fit_abs_tolerance=DEFAULT_FIT_ABS_TOLERANCE,
-                 fit_rel_tolerance=DEFAULT_FIT_REL_TOLERANCE,
-                 fit_verbose=DEFAULT_FIT_VERBOSE,
-                 feedback=DEFAULT_FEEDBACK,
-                 rstate=DEFAULT_RSTATE,
-                 dtype=DEFAULT_DTYPE,
-                 cost_fn=DEFAULT_COST_FN,
-                 ):
+    def __init__(self, svm, data,
+            sgd_step_size0=DEFAULT_SGD_STEP_SIZE0,
+            l2_regularization=DEFAULT_L2_REGULARIZATION,
+            sgd_step_size_scheduling_exponent = DEFAULT_SGD_EXPONENT,
+            sgd_step_size_scheduling_multiplier = DEFAULT_SGD_TIMESCALE,
+            min_observations=DEFAULT_MIN_OBSERVATIONS,
+            max_observations=DEFAULT_MAX_OBSERVATIONS,
+            fit_n_partial=DEFAULT_N_PARTIAL,
+            fit_abs_tolerance=DEFAULT_FIT_ABS_TOLERANCE,
+            fit_rel_tolerance=DEFAULT_FIT_REL_TOLERANCE,
+            fit_verbose=DEFAULT_FIT_VERBOSE,
+            feedback=DEFAULT_FEEDBACK,
+            rstate=DEFAULT_RSTATE,
+            dtype=DEFAULT_DTYPE,
+            cost_fn=DEFAULT_COST_FN,
+            ):
+
+        self.data = data
+        self.svm = svm
+        n_features = svm.n_features
+        n_classes = svm.n_classes
 
         # --
         assert n_features > 1
@@ -197,45 +178,22 @@ class BaseASGD(object):
         self.asgd_step_size = self.asgd_step_size0
         self.asgd_start = 0
 
+        # --
         self.sgd_step_size = self.sgd_step_size0
         self.train_means = []
         self.recent_train_costs = []
 
-    def fit_converged(self):
-        """
-        There are two convergence tests here. Training is considered to be
-        over if it has
+        # --
+        self.asgd_weights = svm.weights
+        self.asgd_bias = svm.bias
+        self.sgd_weights = svm.weights.copy()
+        self.sgd_bias = svm.bias.copy()
 
-        * stalled: latest train_means is allclose to a previous one (*)
+    def __iter__(self):
+        return self
 
-        * terminated: latest train_means is allclose to 0
-
-        """
-        train_means = self.train_means
-        rtol = self.fit_rel_tolerance
-        atol = self.fit_abs_tolerance
-
-        if self.fit_verbose:
-            print 'fit_converged:', len(train_means), train_means[-1]
-
-        # -- check for perfect fit
-        if len(train_means) > 1:
-            assert np.min(train_means) >= 0
-            if np.allclose(train_means[-1], 0, atol=atol, rtol=rtol):
-                return True
-
-        # -- check for stall condition
-        if len(train_means) > 10:
-            old_pt = max(
-                    len(train_means) // 2,
-                    len(train_means) - 10)
-            thresh = (1 - rtol) * train_means[old_pt] - atol
-            if train_means[-1] > thresh:
-                return True
-
-        return False
-
-    def fit(self, X, y):
+    def next(self):
+        X, y = self.data
 
         assert X.ndim == 2
         assert y.ndim == 1
@@ -246,73 +204,43 @@ class BaseASGD(object):
 
         n_points_remaining = self.max_observations - self.n_observations
 
-        while n_points_remaining > 0:
+        if n_points_remaining <= 0:
+            raise StopIteration()
 
-            # -- every iteration will train from n_partial observations and
-            # then check for convergence
-            fit_n_partial = min(n_points_remaining, self.fit_n_partial)
+        # -- every iteration will train from n_partial observations and
+        # then check for convergence
+        fit_n_partial = min(n_points_remaining, self.fit_n_partial)
 
-            all_idxs = self.rstate.permutation(n_points)
-            idxs = all_idxs[:fit_n_partial]
-            if hasattr(self, 'partial_fit_by_index'):
-                self.partial_fit_by_index(idxs, X, y)
-            else:
-                self.partial_fit(X[idxs], y[idxs])
-
-            if self.feedback:
-                raise NotImplementedError(
-                    'partial_fit logic requires memory to be distinct')
-                self.sgd_weights = self.asgd_weights
-                self.sgd_bias = self.asgd_bias
-
-            if (self.n_observations >= self.min_observations
-                    and self.fit_converged()):
-                break
-
-            n_points_remaining -= len(idxs)
-
-        return self
-
-    def test_error_rate(self, X, y, return_stderr=False):
-        yhat = self.predict(X)
-        mu = np.mean((y != yhat).astype('float'))
-        var = mu * (1 - mu) / (len(y) - 1)
-        stderr = np.sqrt(var)
-        if return_stderr:
-            return mu, stderr
+        all_idxs = self.rstate.permutation(n_points)
+        idxs = all_idxs[:fit_n_partial]
+        if hasattr(self, 'partial_fit_by_index'):
+            self.partial_fit_by_index(idxs, X, y)
         else:
-            return mu
+            self.partial_fit(X[idxs], y[idxs])
+
+        if self.feedback:
+            raise NotImplementedError(
+                'partial_fit logic requires memory to be distinct')
+            self.sgd_weights = self.asgd_weights
+            self.sgd_bias = self.asgd_bias
+
+        if (self.n_observations >= self.min_observations
+                and fit_converged(self.train_means,
+                    rtol=self.fit_rel_tolerance,
+                    atol=self.fit_abs_tolerance,
+                    verbose=self.fit_verbose)):
+            raise StopIteration()
+
+        self.svm.weights = self.asgd_weights
+        self.svm.bias = self.asgd_bias
+
+        return self.svm
 
 
-class BaseBinaryASGD(BaseASGD):
-
-    def __init__(self, *args, **kwargs):
-        BaseASGD.__init__(self, *args, **kwargs)
-
-        self.sgd_weights = np.zeros((self.n_features,), dtype=self.dtype)
-        self.sgd_bias = np.asarray(0, dtype=self.dtype)
-
-        self.asgd_weights = np.zeros((self.n_features,), dtype=self.dtype)
-        self.asgd_bias = np.asarray(0, dtype=self.dtype)
-
-    def decision_function(self, X):
-        X = np.asarray(X)
-        return dot(self.asgd_weights, X.T) + self.asgd_bias
-
-    def predict(self, X):
-        return np.sign(self.decision_function(X))
-
-    def cost(self, X, y):
-        weights = self.asgd_weights
-        bias = self.asgd_bias
-        margin = y * (np.dot(X, weights) + bias)
-        l2_cost = self.l2_regularization * (weights ** 2).sum()
-        loss = self.cost_fn.f(margin)
-        rval = loss.mean() + l2_cost
-        return rval
-
-
-class NaiveBinaryASGD(BaseBinaryASGD):
+class BinaryASGD(BaseASGD):
+    """
+    ASGD trainer for binary classification with any of the losses
+    """
 
     def partial_fit(self, X, y):
         assert np.all(y ** 2 == 1)  # make sure labels are +-1
@@ -390,48 +318,18 @@ class NaiveBinaryASGD(BaseBinaryASGD):
 
         return self
 
-
-class BaseMultiASGD(BaseASGD):
-    """
-    Allocate weight vectors for one-vs-all multiclass SVM
-    """
-    def __init__(self, n_classes, n_features, *args, **kwargs):
-        BaseASGD.__init__(self, n_features, *args, **kwargs)
-
-        # --
-        self.n_classes = n_classes
-
-        dtype = self.dtype
-        # --
-        self.sgd_weights = np.zeros((n_features, n_classes), dtype=dtype)
-        self.sgd_bias = np.zeros(n_classes, dtype=dtype)
-        self.asgd_weights = np.zeros((n_features, n_classes), dtype=dtype)
-        self.asgd_bias = np.zeros(n_classes, dtype=dtype)
-
-    def decision_function(self, X):
-        X = np.asarray(X)
-        return dot(X, self.asgd_weights) + self.asgd_bias
-
-    def predict(self, X):
-        return self.decision_function(X).argmax(axis=1)
-
-
-class OVAASGD(BaseMultiASGD):
-    def cost(self, X, y):
-        weights = self.asgd_weights
-        bias = self.asgd_bias
-        targets = (y[:, None] == np.arange(self.n_classes)) * 2 - 1
-        margin = targets * (dot(np.asarray(X), weights) + bias)
-        losses = self.cost_fn.f(margin)
-        flat_weights = weights.flatten()
-        l2_term = np.dot(flat_weights, flat_weights)
-        #l2_term += np.dot(bias, bias)
-        l2_cost = .5 * self.l2_regularization * l2_term
-        rval = losses.mean() + l2_cost
+    def cost(self):
+        X, y = self.data
+        svm = self.svm
+        margin = svm.decisions(X) * y
+        assert margin.ndim == 1
+        l2_cost = .5 * self.l2_regularization * (svm.weights ** 2).sum()
+        loss = self.cost_fn.f(margin)
+        rval = loss.mean() + l2_cost
         return rval
 
 
-class NaiveOVAASGD(OVAASGD):
+class OneVsAllASGD(BaseASGD):
     def partial_fit(self, X, y):
         return self.partial_fit_by_index(range(len(X)), X, y)
 
@@ -570,27 +468,35 @@ class NaiveOVAASGD(OVAASGD):
 
         return self
 
-
-class RankASGD(BaseMultiASGD):
-    def cost(self, X, y):
-        weights = self.asgd_weights
-        bias = self.asgd_bias
-        decisions = dot(np.asarray(X), weights) + bias
-        margins = []
-        for decision, label in zip(decisions, y):
-            dsrt = np.argsort(decision)
-            distractor = dsrt[-2] if dsrt[-1] == label else dsrt[-1]
-            margin = decision[label] - decision[distractor]
-            margins.append(margin)
-
-        flat_weights = weights.flatten()
-        l2_term = np.dot(flat_weights, flat_weights)
-        l2_cost = self.l2_regularization * l2_term
-        rval = self.cost_fn.f(margins).mean() + l2_cost
+    def cost(self):
+        X, y = self.data
+        svm = self.svm
+        margin = svm.decisions(X) * (-1)
+        margin[np.arange(len(y)), y] *= -1
+        assert margin.ndim == 2
+        l2_cost = .5 * self.l2_regularization * (svm.weights ** 2).sum()
+        loss = self.cost_fn.f(margin)
+        rval = loss.sum(axis=1).mean() + l2_cost
         return rval
 
 
-class NaiveRankASGD(RankASGD):
+class CrammerSingerCost(object):
+    def cost(self):
+        X, y = self.data
+        svm = self.svm
+        decisions = svm.decisions(X)
+        margin = []
+        for ii, (decision, label) in enumerate(zip(decisions, y)):
+            dsrt = np.argsort(decision)
+            distractor = dsrt[-2] if dsrt[-1] == label else dsrt[-1]
+            margin.append(decision[label] - decision[distractor])
+        l2_cost = .5 * self.l2_regularization * (svm.weights ** 2).sum()
+        loss = self.cost_fn.f(np.asarray(margin))
+        rval = loss.mean() + l2_cost
+        return rval
+
+
+class NaiveRankASGD(BaseASGD, CrammerSingerCost):
     """
     Implements rank-based multiclass SVM.
     """
@@ -689,15 +595,10 @@ class NaiveRankASGD(RankASGD):
         return self
 
 
-class SparseUpdateRankASGD(BaseMultiASGD):
+class SparseUpdateRankASGD(BaseASGD, CrammerSingerCost):
     """
     Implements rank-based multiclass SVM.
     """
-
-    #XXX
-    #XXX
-    # TODO: implement l2-SVM here by updating
-    #       sgd rows in proportion to hinge loss
 
     #@profile
     def partial_fit(self, X, y):
@@ -732,13 +633,10 @@ class SparseUpdateRankASGD(BaseMultiASGD):
         # -- the logical sgd_weight matrix is sgd_weights_scale * sgd_weights
         sgd_weights_scale = 1.0
 
-        use_asgd_scale = True
-
-        if use_asgd_scale:
-            # -- the logical asgd_weights is stored as a row-wise linear
-            # -- combination of asgd_weights and sgd_weights
-            asgd_scale = np.ones((n_classes, 2), dtype=asgd_weights.dtype)
-            asgd_scale[:, 1] = 0  # -- originally there is no sgd contribution
+        # -- the logical asgd_weights is stored as a row-wise linear
+        # -- combination of asgd_weights and sgd_weights
+        asgd_scale = np.ones((n_classes, 2), dtype=asgd_weights.dtype)
+        asgd_scale[:, 1] = 0  # -- originally there is no sgd contribution
 
         scal, axpy, gemv = scipy.linalg.blas.get_blas_funcs(
                 ['scal', 'axpy', 'gemv'],
@@ -771,58 +669,48 @@ class SparseUpdateRankASGD(BaseMultiASGD):
             cost = self.cost_fn.f(margin)
             grad = self.cost_fn.df(margin)
 
-            if grad:
-                # -- perform the delayed updates to the rows of asgd
+            if grad != 0.0:
 
-                if use_asgd_scale:
-                    # -- XXX: this should be a single BLAS call to axpy
-                    for idx in [distractor, label]:
-                        scal(
-                                a=asgd_scale[idx, 0],
-                                x=asgd_weights,
-                                n=n_features,
-                                offx=idx * n_features)
-                        axpy(
-                                a=(asgd_scale[idx, 1] *
-                                    sgd_weights_scale),
-                                x=sgd_weights,
-                                y=asgd_weights,
-                                offx=idx * n_features,
-                                offy=idx * n_features,
-                                n=n_features)
-                        asgd_scale[idx, 0] = 1
-                        asgd_scale[idx, 1] = 0
+                # -- perform the delayed updates to the rows of asgd
+                for idx in [distractor, label]:
+                    scal(
+                            a=asgd_scale[idx, 0],
+                            x=asgd_weights,
+                            n=n_features,
+                            offx=idx * n_features)
+                    axpy(
+                            a=(asgd_scale[idx, 1] *
+                                sgd_weights_scale),
+                            x=sgd_weights,
+                            y=asgd_weights,
+                            offx=idx * n_features,
+                            offy=idx * n_features,
+                            n=n_features)
+                    asgd_scale[idx, 0] = 1
+                    asgd_scale[idx, 1] = 0
 
                 step = grad * sgd_step_size / sgd_weights_scale
-                if 1:
-                    axpy(
-                            a=step,
-                            x=obs,
-                            y=sgd_weights,
-                            offy=distractor * n_features,
-                            n=n_features)
-                    axpy(
-                            a=-step,
-                            x=obs,
-                            y=sgd_weights,
-                            offy=label * n_features,
-                            n=n_features)
-                else:
-                    sgd_weights[:, distractor] += step * obs
-                    sgd_weights[:, label] -= step * obs
+                axpy(
+                        a=step,
+                        x=obs,
+                        y=sgd_weights,
+                        offy=distractor * n_features,
+                        n=n_features)
+                axpy(
+                        a=-step,
+                        x=obs,
+                        y=sgd_weights,
+                        offy=label * n_features,
+                        n=n_features)
                 sgd_bias[distractor] += grad * sgd_step_size
                 sgd_bias[label] -= grad * sgd_step_size
                 recent_train_costs.append(cost)
             else:
                 recent_train_costs.append(cost)
 
-            if use_asgd_scale:
-                # -- update asgd via scale variables
-                asgd_scale *= (1 - asgd_step_size)
-                asgd_scale[:, 1] += asgd_step_size
-            else:
-                asgd_weights = (1 - asgd_step_size) * asgd_weights \
-                        + asgd_step_size * sgd_weights
+            # -- update asgd via scale variables
+            asgd_scale *= (1 - asgd_step_size)
+            asgd_scale[:, 1] += asgd_step_size
 
             asgd_bias = (1 - asgd_step_size) * asgd_bias \
                     + asgd_step_size * sgd_bias
@@ -841,11 +729,10 @@ class SparseUpdateRankASGD(BaseMultiASGD):
                 asgd_step_size = 1. / (n_observations - asgd_start)
 
             if len(recent_train_costs) == self.fit_n_partial:
-                if use_asgd_scale:
-                    asgd_weights[:] *= asgd_scale[:, 0]
-                    asgd_weights[:] += (sgd_weights_scale * asgd_scale[:, 1]) * sgd_weights
-                    asgd_scale[:, 0] = 1
-                    asgd_scale[:, 1] = 0
+                asgd_weights[:] *= asgd_scale[:, 0]
+                asgd_weights[:] += (sgd_weights_scale * asgd_scale[:, 1]) * sgd_weights
+                asgd_scale[:, 0] = 1
+                asgd_scale[:, 1] = 0
 
                 # -- Technically the stopping criterion should be based on
                 #    the loss incurred by the asgd weights
@@ -863,11 +750,10 @@ class SparseUpdateRankASGD(BaseMultiASGD):
         self.sgd_bias = sgd_bias
         self.sgd_step_size = sgd_step_size
 
-        if use_asgd_scale:
-            asgd_weights[:] *= asgd_scale[:, 0]
-            asgd_weights[:] += (sgd_weights_scale * asgd_scale[:, 1]) * sgd_weights
-            asgd_scale[:, 0] = 1
-            asgd_scale[:, 1] = 0
+        asgd_weights[:] *= asgd_scale[:, 0]
+        asgd_weights[:] += (sgd_weights_scale * asgd_scale[:, 1]) * sgd_weights
+        asgd_scale[:, 0] = 1
+        asgd_scale[:, 1] = 0
 
         self.asgd_weights = asgd_weights
         self.asgd_bias = asgd_bias

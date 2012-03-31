@@ -1,10 +1,14 @@
 
-import numpy as np
 from itertools import izip
 
-from naive_asgd import BaseASGD
+import numpy as np
+from scipy.optimize.lbfgsb import fmin_l_bfgs_b
 
-from naive_asgd import (
+import theano
+import theano.ifelse
+import theano.tensor as tensor
+
+from .naive_asgd import (
         DEFAULT_SGD_STEP_SIZE0,
         DEFAULT_L2_REGULARIZATION,
         DEFAULT_FEEDBACK,
@@ -13,10 +17,7 @@ from naive_asgd import (
         DEFAULT_SGD_EXPONENT,
         DEFAULT_SGD_TIMESCALE)
 
-import theano
-import theano.ifelse
-import theano.tensor as tensor
-
+from .base import classifier_from_weights
 
 class TheanoBinaryASGD(object):
 
@@ -295,29 +296,101 @@ class TheanoBinaryASGD(object):
 
 
 
-class TheanoOVAPartialFit(object):
-    def __init__(self, n_features, n_classes, l2_penalty, dtype):
+def TheanoOVA(svm, data,
+        l2_regularization=1e-3,
+        dtype='float64',
+        GPU_blocksize=1000 * (1024 ** 2), # bytes
+        verbose=False,
+        ):
+    n_features, n_classes  = svm.weights.shape
 
-        X = tensor.matrix(dtype=dtype)
-        yvecs = tensor.matrix(dtype=dtype)
-        sgd_params = tensor.vector(dtype=dtype)
+    _X = theano.shared(np.ones((2, 2), dtype=dtype),
+            allow_downcast=True)
+    _yvecs = theano.shared(np.ones((2, 2), dtype=dtype),
+            allow_downcast=True)
 
-        flat_sgd_weights = sgd_params[:n_features * n_classes]
-        sgd_weights = flat_sgd_weights.reshape((n_features, n_classes))
-        sgd_bias = sgd_params[n_features * n_classes:]
+    sgd_params = tensor.vector(dtype=dtype)
 
-        margin = yvecs * (tensor.dot(X, sgd_weights) + sgd_bias)
-        losses = tensor.maximum(0, 1 - margin) ** 2
-        l2_cost = .5 * l2_penalty * tensor.dot(
-                flat_sgd_weights, flat_sgd_weights)
+    flat_sgd_weights = sgd_params[:n_features * n_classes]
+    sgd_weights = flat_sgd_weights.reshape((n_features, n_classes))
+    sgd_bias = sgd_params[n_features * n_classes:]
 
-        cost = losses.mean(axis=0).sum() + l2_cost
-        dcost_dparams = tensor.grad(cost, sgd_params)
+    margin = _yvecs * (tensor.dot(_X, sgd_weights) + sgd_bias)
+    losses = tensor.maximum(0, 1 - margin) ** 2
+    l2_cost = .5 * l2_regularization * tensor.dot(
+            flat_sgd_weights, flat_sgd_weights)
 
-        self.fn = theano.function([sgd_params, X, yvecs],
-                [cost, dcost_dparams])
+    cost = losses.mean(axis=0).sum() + l2_cost
+    dcost_dparams = tensor.grad(cost, sgd_params)
 
-    def __call__(self, p, x, y):
-        c, d = self.fn(p.astype('float32'), x, y)
-        return c.astype('float64'), d.astype('float64')
+    _f_df = theano.function([sgd_params], [cost, dcost_dparams])
+
+    assert dtype == 'float32'
+    sizeof_dtype = 4
+    X, y = data
+    yvecs = np.asarray(
+            (y[:, None] == np.arange(n_classes)) * 2 - 1,
+            dtype=dtype)
+
+    X_blocks = np.ceil(X.size * sizeof_dtype / float(GPU_blocksize))
+
+    examples_per_block = len(X) // X_blocks
+
+    if verbose:
+        print 'dividing into', X_blocks, 'blocks of', examples_per_block
+
+    collect_estimates = (examples_per_block < len(X))
+
+    # -- create a dummy class because a nested function cannot modify
+    #    params_mean in enclosing scope
+    class Dummy(object):
+        def __init__(self):
+            params = np.zeros(n_features * n_classes + n_classes)
+            params[:n_features * n_classes] = svm.weights.flatten()
+            params[n_features * n_classes:] = svm.bias
+
+            self.params = params
+            self.params_mean = params.copy().astype('float64')
+            self.params_mean_i = 0
+
+        def __call__(self, p):
+            if collect_estimates:
+                self.params_mean_i += 1
+                alpha = 1.0 / self.params_mean_i
+                self.params_mean *= 1 - alpha
+                self.params_mean += alpha * p
+            c, d = _f_df(p.astype(dtype))
+            return c.astype('float64'), d.astype('float64')
+    dummy = Dummy()
+
+    i = 0
+    while i + examples_per_block <= len(X):
+        if verbose:
+            print 'training on examples', i, 'to', i + examples_per_block
+        _X.set_value(
+                X[i:i + examples_per_block],
+                borrow=True)
+        _yvecs.set_value(
+                yvecs[i:i + examples_per_block],
+                borrow=True)
+
+        best, bestval, info_dct  = fmin_l_bfgs_b(dummy,
+                dummy.params_mean.copy(),
+                iprint=1 if verbose else -1,
+                factr=1e11,  # -- 1e12 for low acc, 1e7 for moderate
+                )
+
+        i += examples_per_block
+
+    if collect_estimates:
+        params = dummy.params_mean
+    else:
+        params = best
+
+    rval = classifier_from_weights(
+            weights=params[:n_classes * n_features].reshape(
+                (n_features, n_classes)),
+            bias=params[n_classes * n_features:])
+
+    return rval
 

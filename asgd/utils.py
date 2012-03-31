@@ -82,3 +82,14 @@ def geometric_bracket_min(f, x0, x1, f_thresh):
             y1 = float(f(x1))
     return (x0, x1)
 
+
+def test_error_rate(y, yhat, return_stderr=False):
+    mu = np.mean((y != yhat).astype('float'))
+    var = mu * (1 - mu) / (len(y) - 1)
+    stderr = np.sqrt(var)
+    if return_stderr:
+        return mu, stderr
+    else:
+        return mu
+
+
