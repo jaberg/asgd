@@ -10,6 +10,7 @@ a somewhat uniform interface to various internal and external solvers.
 .. code:: python
 
     import numpy as np
+    import asgd
 
     # -- True model (w, b)
     w = np.random.randn(5)       # weights
