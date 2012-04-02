@@ -339,12 +339,10 @@ def TheanoOVA(svm, data,
     if verbose:
         print 'dividing into', X_blocks, 'blocks of', examples_per_block
 
-    collect_estimates = (examples_per_block < len(X))
-
     # -- create a dummy class because a nested function cannot modify
     #    params_mean in enclosing scope
     class Dummy(object):
-        def __init__(self):
+        def __init__(self, collect_estimates):
             params = np.zeros(n_features * n_classes + n_classes)
             params[:n_features * n_classes] = svm.weights.flatten()
             params[n_features * n_classes:] = svm.bias
@@ -352,16 +350,20 @@ def TheanoOVA(svm, data,
             self.params = params
             self.params_mean = params.copy().astype('float64')
             self.params_mean_i = 0
+            self.collect_estimates = collect_estimates
+
+        def update_mean(self, p):
+            self.params_mean_i += 1
+            alpha = 1.0 / self.params_mean_i
+            self.params_mean *= 1 - alpha
+            self.params_mean += alpha * p
 
         def __call__(self, p):
-            if collect_estimates:
-                self.params_mean_i += 1
-                alpha = 1.0 / self.params_mean_i
-                self.params_mean *= 1 - alpha
-                self.params_mean += alpha * p
+            if self.collect_estimates:
+                self.update_mean(p)
             c, d = _f_df(p.astype(dtype))
             return c.astype('float64'), d.astype('float64')
-    dummy = Dummy()
+    dummy = Dummy(X_blocks > 2)
 
     i = 0
     while i + examples_per_block <= len(X):
@@ -379,13 +381,11 @@ def TheanoOVA(svm, data,
                 iprint=1 if verbose else -1,
                 factr=1e11,  # -- 1e12 for low acc, 1e7 for moderate
                 )
+        dummy.update_mean(best)
 
         i += examples_per_block
 
-    if collect_estimates:
-        params = dummy.params_mean
-    else:
-        params = best
+    params = dummy.params_mean
 
     rval = classifier_from_weights(
             weights=params[:n_classes * n_features].reshape(

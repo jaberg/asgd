@@ -259,6 +259,7 @@ class LinearSVM(object):
                     pass
 
             elif method in ('asgd.TheanoOVA',):
+                method_kwargs.setdefault('verbose', self.verbose)
                 dtype = method_kwargs.get('dtype', X.dtype)
                 svm = classifier(n_classes, n_features, dtype=dtype)
                 svm = TheanoOVA(svm, data=(X, y),
