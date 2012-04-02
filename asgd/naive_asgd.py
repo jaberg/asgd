@@ -602,7 +602,7 @@ class SparseUpdateRankASGD(BaseASGD, CrammerSingerCost):
 
     #@profile
     def partial_fit(self, X, y):
-        if set(y) > set(range(self.n_classes)):
+        if set(y) > set(range(self.svm.n_classes)):
             raise ValueError("Invalid 'y'")
         ttt = time.time()
 
@@ -624,7 +624,7 @@ class SparseUpdateRankASGD(BaseASGD, CrammerSingerCost):
         l2_regularization = self.l2_regularization
 
         n_observations = self.n_observations
-        n_classes = self.n_classes
+        n_classes = self.svm.n_classes
         n_features = asgd_weights.shape[0]
 
         train_means = self.train_means

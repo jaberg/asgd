@@ -194,14 +194,35 @@ class LinearSVM(object):
             elif method == 'asgd.SparseUpdateRankASGD':
                 method_kwargs = dict(method_kwargs)
                 method_kwargs.setdefault('rstate', np.random.RandomState(123))
-                auto_step_size0 = method_kwargs.pop('auto_step_size0', True)
-                svm = SparseUpdateRankASGD(n_classes, n_features,
+                auto_step_size0 = method_kwargs.pop(
+                        'auto_step_size0', True)
+                auto_max_examples = method_kwargs.pop(
+                        'auto_max_examples', 1000)
+                auto_step_size0_floor = method_kwargs.pop(
+                        'auto_step_size0_floor', 1e-7)
+
+                svm = classifier(n_classes, n_features,
+                        dtype=method_kwargs.get('dtype', 'float32'))
+
+                if auto_step_size0:
+                    all_idxs = method_kwargs['rstate'].permutation(len(X))
+                    idxs = all_idxs[:auto_max_examples]
+                    step_size0 = find_sgd_step_size0(SparseUpdateRankASGD,
+                            svm=svm,
+                            data=(X[idxs], y[idxs]),
+                            l2_regularization=l2_regularization,
+                            **method_kwargs)
+                    step_size0 = max(step_size0 / 2.0, auto_step_size0_floor)
+                    logger.info('setting sgd_step_size: %e' % step_size0)
+                    method_kwargs['sgd_step_size0'] = float(step_size0)
+
+                trainer = SparseUpdateRankASGD(svm, (X, y),
                         l2_regularization=l2_regularization,
                         **method_kwargs)
-                if auto_step_size0:
-                    svm = binary_fit(svm, (X, y))
-                else:
-                    svm.fit(X, y)
+
+                for svm in trainer:
+                    # this loop does the training
+                    pass
 
             elif method in ('asgd.NaiveOVAASGD', 'asgd.OneVsAllASGD'):
                 # -- one vs. all
