@@ -1,4 +1,4 @@
-
+import copy
 from itertools import izip
 
 import numpy as np
@@ -296,7 +296,7 @@ class TheanoBinaryASGD(object):
 
 
 
-def TheanoOVA(svm, data,
+def BlockedTheanoOVA(svm, data,
         l2_regularization=1e-3,
         dtype='float64',
         GPU_blocksize=1000 * (1024 ** 2), # bytes
@@ -380,6 +380,7 @@ def TheanoOVA(svm, data,
                 dummy.params_mean.copy(),
                 iprint=1 if verbose else -1,
                 factr=1e11,  # -- 1e12 for low acc, 1e7 for moderate
+                maxfun=1000,
                 )
         dummy.update_mean(best)
 
@@ -394,3 +395,117 @@ def TheanoOVA(svm, data,
 
     return rval
 
+
+def SubsampledTheanoOVA(svm, data,
+        l2_regularization=1e-3,
+        dtype='float64',
+        feature_bytes=1000 * (1024 ** 2), # bytes
+        verbose=False,
+        rng=None,
+        n_runs=None,  # None -> smallest int that uses all data
+        cost_fn='L2Huber',
+        ):
+    # I tried to change the problem to work with reduced regularization
+    # or a smaller minimal margin (e.g. < 1) to compensate for the missing
+    # features, but nothing really worked.
+    #
+    # I think the better thing would be to do boosting, in just the way we
+    # did in the eccv12 project (see e.g. MarginASGD)
+    n_features, n_classes = svm.weights.shape
+    assert dtype == 'float32'
+    sizeof_dtype = 4
+    X, y = data
+    Xbytes = X.size * sizeof_dtype
+    keep_ratio = float(feature_bytes) / Xbytes
+    if n_runs is None:
+        n_runs = int(np.ceil(1. / keep_ratio))
+    n_keep = int(np.ceil(X.shape[1] / float(n_runs)))
+
+    _X = theano.shared(np.ones((2, 2), dtype=dtype),
+            allow_downcast=True)
+    _yvecs = theano.shared(np.ones((2, 2), dtype=dtype),
+            allow_downcast=True)
+
+    sgd_params = tensor.vector(dtype=dtype)
+    s_n_use = tensor.lscalar()
+
+    flat_sgd_weights = sgd_params[:s_n_use * n_classes]
+    sgd_weights = flat_sgd_weights.reshape((s_n_use, n_classes))
+    sgd_bias = sgd_params[s_n_use * n_classes:]
+
+    margin = _yvecs * (tensor.dot(_X, sgd_weights) + sgd_bias)
+
+    if cost_fn == 'L2Half':
+        losses = tensor.maximum(0, 1 - margin) ** 2
+    elif cost_fn == 'L2Huber':
+        # "Huber-ized" L2-SVM
+        losses = tensor.switch(
+                margin > -1,
+                # -- smooth part
+                tensor.maximum(0, 1 - margin) ** 2,
+                # -- straight part
+                -4 * margin)
+    elif cost_fn == 'Hinge':
+        losses = tensor.maximum(0, 1 - margin)
+    else:
+        raise ValueError('invalid cost-fn', cost_fn)
+
+    l2_cost = .5 * l2_regularization * tensor.dot(
+            flat_sgd_weights, flat_sgd_weights)
+
+    cost = losses.mean(axis=0).sum() + l2_cost
+    dcost_dparams = tensor.grad(cost, sgd_params)
+
+    _f_df = theano.function([sgd_params, s_n_use], [cost, dcost_dparams])
+
+    yvecs = np.asarray(
+            (y[:, None] == np.arange(n_classes)) * 2 - 1,
+            dtype=dtype)
+
+    def flatten_svm(obj):
+        return np.concatenate([obj.weights.flatten(), obj.bias])
+
+    if verbose:
+        print 'keeping', n_keep, 'of', X.shape[1], 'features'
+
+    if rng is None:
+        rng = np.random.RandomState(123)
+
+    all_feat_randomized = rng.permutation(X.shape[1])
+    bests = []
+    for ii in range(n_runs):
+        use_features = all_feat_randomized[ii * n_keep: (ii + 1) * n_keep]
+        assert len(use_features)
+        n_use = len(use_features)
+
+        def f(p):
+            c, d = _f_df(p.astype(dtype), n_use)
+            return c.astype('float64'), d.astype('float64')
+
+        params = np.zeros(n_use * n_classes + n_classes)
+        params[:n_use * n_classes] = svm.weights[use_features].flatten()
+        params[n_use * n_classes:] = svm.bias
+
+        _X.set_value(X[:, use_features], borrow=True)
+        _yvecs.set_value(yvecs, borrow=True)
+
+        best, bestval, info_dct = fmin_l_bfgs_b(f,
+                params,
+                iprint=1 if verbose else -1,
+                factr=1e11,  # -- 1e12 for low acc, 1e7 for moderate
+                maxfun=1000,
+                )
+        best_svm = copy.deepcopy(svm)
+        best_svm.weights[use_features] = best[:n_classes * n_use].reshape(
+                    (n_use, n_classes))
+        best_svm.bias = best[n_classes * n_use:]
+        bests.append(flatten_svm(best_svm))
+
+    # sum instead of mean here, because each loop iter trains only a subset of
+    # features. XXX: This assumes that those subsets are mutually exclusive
+    best_params = np.sum(bests, axis=0)
+    rval = copy.deepcopy(svm)
+    rval.weights = best_params[:n_classes * n_features].reshape(
+                (n_features, n_classes))
+    rval.bias = best_params[n_classes * n_features:]
+    return rval

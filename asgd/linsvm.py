@@ -21,7 +21,8 @@ except ImportError:
     pass
 
 try:
-    from .theano_asgd import TheanoOVA
+    from .theano_asgd import BlockedTheanoOVA
+    from .theano_asgd import SubsampledTheanoOVA
 except ImportError:
     pass
 
@@ -258,11 +259,19 @@ class LinearSVM(object):
                     # this loop does the training
                     pass
 
-            elif method in ('asgd.TheanoOVA',):
+            elif method in ('asgd.BlockedTheanoOVA',):
                 method_kwargs.setdefault('verbose', self.verbose)
                 dtype = method_kwargs.get('dtype', X.dtype)
                 svm = classifier(n_classes, n_features, dtype=dtype)
-                svm = TheanoOVA(svm, data=(X, y),
+                svm = BlockedTheanoOVA(svm, data=(X, y),
+                        l2_regularization=l2_regularization,
+                        **method_kwargs)
+
+            elif method in ('asgd.SubsampledTheanoOVA',):
+                method_kwargs.setdefault('verbose', self.verbose)
+                dtype = method_kwargs.get('dtype', X.dtype)
+                svm = classifier(n_classes, n_features, dtype=dtype)
+                svm = SubsampledTheanoOVA(svm, data=(X, y),
                         l2_regularization=l2_regularization,
                         **method_kwargs)
 
