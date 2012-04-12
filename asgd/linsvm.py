@@ -301,8 +301,8 @@ class LinearSVM(object):
     def predict(self, *args, **kwargs):
         return self.svm.predict(*args, **kwargs)
 
-    def decision_function(self, *args, **kwargs):
-        return self.svm.decision_function(*args, **kwargs)
+    def decisions(self, *args, **kwargs):
+        return self.svm.decisions(*args, **kwargs)
 
     def __call__(self, *args, **kwargs):
         return self.predict(*args, **kwargs)
