@@ -404,6 +404,8 @@ def SubsampledTheanoOVA(svm, data,
         rng=None,
         n_runs=None,  # None -> smallest int that uses all data
         cost_fn='L2Huber',
+        bfgs_factr=1e11,  # 1e7 for moderate tolerance, 1e12 for low
+        bfgs_maxfun=1000,
         ):
     # I tried to change the problem to work with reduced regularization
     # or a smaller minimal margin (e.g. < 1) to compensate for the missing
@@ -412,12 +414,11 @@ def SubsampledTheanoOVA(svm, data,
     # I think the better thing would be to do boosting, in just the way we
     # did in the eccv12 project (see e.g. MarginASGD)
     n_features, n_classes = svm.weights.shape
-    assert dtype == 'float32'
-    sizeof_dtype = 4
     X, y = data
-    Xbytes = X.size * sizeof_dtype
-    keep_ratio = float(feature_bytes) / Xbytes
     if n_runs is None:
+        sizeof_dtype = {'float32': 4, 'float64': 8}[dtype]
+        Xbytes = X.size * sizeof_dtype
+        keep_ratio = float(feature_bytes) / Xbytes
         n_runs = int(np.ceil(1. / keep_ratio))
     n_keep = int(np.ceil(X.shape[1] / float(n_runs)))
 
@@ -492,8 +493,8 @@ def SubsampledTheanoOVA(svm, data,
         best, bestval, info_dct = fmin_l_bfgs_b(f,
                 params,
                 iprint=1 if verbose else -1,
-                factr=1e11,  # -- 1e12 for low acc, 1e7 for moderate
-                maxfun=1000,
+                factr=bfgs_factr,  # -- 1e12 for low acc, 1e7 for moderate
+                maxfun=bfgs_maxfun,
                 )
         best_svm = copy.deepcopy(svm)
         best_svm.weights[use_features] = best[:n_classes * n_use].reshape(

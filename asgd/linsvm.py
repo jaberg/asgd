@@ -13,6 +13,8 @@ from .naive_asgd import OneVsAllASGD
 from .naive_asgd import NaiveRankASGD
 from .naive_asgd import SparseUpdateRankASGD
 
+from .utils import linear_kernel
+
 from .base import classifier
 
 try:
@@ -158,10 +160,10 @@ class LinearSVM(object):
             elif method == 'sklearn.svm.SVC':
                 C = 1.0 / (l2_regularization * len(X))
                 svm = sklearn.svm.SVC(C=C, scale_C=False, **method_kwargs)
-                raise NotImplementedError(
-                    'save ktrn, multiply Xtst by X in predict()')
                 ktrn = linear_kernel(X, X)
                 svm.fit(ktrn, y)
+                # -- save for use in decisions
+                self._SVC_X = X
 
             else:
                 raise ValueError('unrecognized method', method)
@@ -299,10 +301,22 @@ class LinearSVM(object):
         self.svm = svm
 
     def predict(self, *args, **kwargs):
-        return self.svm.predict(*args, **kwargs)
+        if hasattr(self, '_SVC_X'):
+            assert not kwargs
+            X = args[0]
+            kX = linear_kernel(X, self._SVC_X)
+            return self.svm.predict(kX, *args[1:], **kwargs)
+        else:
+            return self.svm.predict(*args, **kwargs)
 
     def decisions(self, *args, **kwargs):
-        return self.svm.decisions(*args, **kwargs)
+        if hasattr(self, '_SVC_X'):
+            assert not kwargs
+            X = args[0]
+            kX = linear_kernel(X, self._SVC_X)
+            return self.svm.decision_function(kX, *args[1:], **kwargs)
+        else:
+            return self.svm.decisions(*args, **kwargs)
 
     def __call__(self, *args, **kwargs):
         return self.predict(*args, **kwargs)
