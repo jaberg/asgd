@@ -25,6 +25,7 @@ except ImportError:
 try:
     from .theano_asgd import BlockedTheanoOVA
     from .theano_asgd import SubsampledTheanoOVA
+    from .theano_asgd import BinarySubsampledTheanoOVA
 except ImportError:
     pass
 
@@ -164,6 +165,14 @@ class LinearSVM(object):
                 svm.fit(ktrn, y)
                 # -- save for use in decisions
                 self._SVC_X = X
+
+            elif method == 'asgd.BinarySubsampledTheanoOVA':
+                method_kwargs.setdefault('verbose', self.verbose)
+                dtype = method_kwargs.get('dtype', X.dtype)
+                svm = classifier(2, n_features, dtype=dtype)
+                svm = BinarySubsampledTheanoOVA(svm, data=(X, y),
+                        l2_regularization=l2_regularization,
+                        **method_kwargs)
 
             else:
                 raise ValueError('unrecognized method', method)
