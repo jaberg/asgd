@@ -525,17 +525,8 @@ def BinarySubsampledTheanoOVA(svm, data,
         bfgs_maxfun=1000,
         decisions=None
         ):
-    # I tried to change the problem to work with reduced regularization
-    # or a smaller minimal margin (e.g. < 1) to compensate for the missing
-    # features, but nothing really worked.
-    #
-    # I think the better thing would be to do boosting, in just the way we
-    # did in the eccv12 project (see e.g. MarginASGD)
     n_features, = svm.weights.shape
     X, y = data
-
-    if decisions:
-        raise NotImplementedError('decisions in BinarySubsampledTheanoOVA')
 
     # XXX REFACTOR
     if n_runs is None:
@@ -550,6 +541,16 @@ def BinarySubsampledTheanoOVA(svm, data,
             allow_downcast=True)
     _yvecs = theano.shared(y.astype(dtype),
             allow_downcast=True)
+    if decisions:
+        decisions = np.asarray(decisions).astype(dtype)
+        # -- N.B. for multi-class the decisions would be an examples x classes
+        # matrix
+        if decisions.shape != y.shape:
+            raise ValueError('decisions have wrong shape', decisions.shape)
+        _decisions = theano.shared(decisions)
+        del decisions
+    else:
+        _decisions = theano.shared(y.astype(dtype) * 0, allow_downcast=True)
 
     sgd_params = tensor.vector(dtype=dtype)
     s_n_use = tensor.lscalar()
@@ -557,7 +558,7 @@ def BinarySubsampledTheanoOVA(svm, data,
     sgd_weights = sgd_params[:s_n_use]
     sgd_bias = sgd_params[s_n_use]
 
-    margin = _yvecs * (tensor.dot(_X, sgd_weights) + sgd_bias)
+    margin = _yvecs * (tensor.dot(_X, sgd_weights) + sgd_bias + _decisions)
 
     # XXX REFACTOR
     if cost_fn == 'L2Half':
@@ -583,12 +584,19 @@ def BinarySubsampledTheanoOVA(svm, data,
 
     _f_df = theano.function([sgd_params, s_n_use], [cost, dcost_dparams])
 
+    _f_update_decisions = theano.function([sgd_params, s_n_use], [],
+            updates={
+                _decisions: (
+                    tensor.dot(_X, sgd_weights) + sgd_bias + _decisions),
+                })
+
     def flatten_svm(obj):
         # Note this is different from multi-class case because bias is scalar
         return np.concatenate([obj.weights.flatten(), [obj.bias]])
 
     if verbose:
-        print 'keeping', n_keep, 'of', X.shape[1], 'features'
+        print 'keeping', n_keep, 'of', X.shape[1], 'features, per round'
+        print 'running for ', n_runs, 'rounds'
 
     if rng is None:
         rng = np.random.RandomState(123)
@@ -616,13 +624,12 @@ def BinarySubsampledTheanoOVA(svm, data,
                 factr=bfgs_factr,  # -- 1e12 for low acc, 1e7 for moderate
                 maxfun=bfgs_maxfun,
                 )
+        _f_update_decisions(best.astype(dtype), n_use)
         best_svm = copy.deepcopy(svm)
         best_svm.weights[use_features] = best[:n_use].astype(dtype)
         best_svm.bias = float(best[n_use])
         bests.append(flatten_svm(best_svm))
 
-    # sum instead of mean here, because each loop iter trains only a subset of
-    # features. XXX: This assumes that those subsets are mutually exclusive
     best_params = np.sum(bests, axis=0)
     rval = copy.deepcopy(svm)
     rval.weights = best_params[:n_features].astype(dtype)
