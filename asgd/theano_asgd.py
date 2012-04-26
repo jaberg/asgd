@@ -534,6 +534,7 @@ def BinarySubsampledTheanoOVA(svm, data,
         Xbytes = X.size * sizeof_dtype
         keep_ratio = float(feature_bytes) / Xbytes
         n_runs = int(np.ceil(1. / keep_ratio))
+        print 'BinarySubsampledTheanoOVA using n_runs =', n_runs
     n_keep = int(np.ceil(X.shape[1] / float(n_runs)))
 
     assert set(y) == set([-1, 1])
@@ -620,7 +621,7 @@ def BinarySubsampledTheanoOVA(svm, data,
 
         best, bestval, info_dct = fmin_l_bfgs_b(f,
                 params,
-                iprint=1 if verbose else -1,
+                iprint=int(verbose) - 1,
                 factr=bfgs_factr,  # -- 1e12 for low acc, 1e7 for moderate
                 maxfun=bfgs_maxfun,
                 )
