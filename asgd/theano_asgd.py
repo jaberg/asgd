@@ -632,6 +632,7 @@ def BinarySubsampledTheanoOVA(svm, data,
         bests.append(flatten_svm(best_svm))
 
     best_params = np.sum(bests, axis=0)
+    best_params[n_features] /= len(bests)  # bias is estimated on each run
     rval = copy.deepcopy(svm)
     rval.weights = best_params[:n_features].astype(dtype)
     rval.bias = float(best_params[n_features])
