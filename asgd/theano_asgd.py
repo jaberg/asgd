@@ -539,9 +539,9 @@ def BinarySubsampledTheanoOVA(svm, data,
 
     assert set(y) == set([-1, 1])
     _X = theano.shared(np.ones((2, 2), dtype=dtype),
-            allow_downcast=True)
+            allow_downcast=True, borrow=True)
     _yvecs = theano.shared(y.astype(dtype),
-            allow_downcast=True)
+            allow_downcast=True, borrow=True)
     if decisions:
         decisions = np.asarray(decisions).astype(dtype)
         # -- N.B. for multi-class the decisions would be an examples x classes
