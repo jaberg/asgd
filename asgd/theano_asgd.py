@@ -622,22 +622,42 @@ def BinarySubsampledTheanoOVA(svm, data,
         best, bestval, info_dct = fmin_l_bfgs_b(f,
                 params,
                 iprint=int(verbose) - 1,
-                factr=bfgs_factr,  # -- 1e12 for low acc, 1e7 for moderate
+                factr=bfgs_factr,
                 maxfun=bfgs_maxfun,
                 )
-        _f_update_decisions(best.astype(dtype), n_use)
         best_svm = copy.deepcopy(svm)
-        best_svm.weights[use_features] = best[:n_use].astype(dtype)
+        best_svm.weights[use_features] = np.array(best[:n_use], dtype=dtype)
         best_svm.bias = float(best[n_use])
         bests.append(flatten_svm(best_svm))
 
+        _f_update_decisions(best.astype(dtype), n_use)
+        margin_ii = _decisions.get_value() * _yvecs.get_value()
+        print 'run %i: margin min:%f mean:%f max:%f' % (
+                ii, np.min(margin_ii), np.mean(margin_ii), np.max(margin_ii))
+        if 0:
+            # XXX This is a hack that helps but it's basically wrong. The
+            # correct thing to do would be to add two scalars to the
+            # optimization: one scalar represents the total l2 norm of the
+            # weight vector fit so far.  The second scalar represents how much
+            # to down-weight the total vector fit so far in response to the
+            # utility of the current feature set.  So this second scalar would
+            # scale the vector of previous decisions, and the l2-cost would
+            # always be the l2-cost of the entire vector so far.
+            _decisions.set_value(
+                    _decisions.get_value() - np.min(margin_ii) * y)
+        elif (ii < (n_runs - 1)) and (np.min(margin_ii) > .95):
+            print 'Margin has been maximized after', ii, 'of', n_runs
+            break
+
+    # N.B. we might have used fewer than n_runs
     best_params = np.sum(bests, axis=0)
     best_params[n_features] /= len(bests)  # bias is estimated on each run
     rval = copy.deepcopy(svm)
     rval.weights = best_params[:n_features].astype(dtype)
     rval.bias = float(best_params[n_features])
 
-    # XXX: figure out why Theano may be not freeing this memory?
+    # XXX: figure out why Theano may be not freeing this memory, why does
+    # writing little matrices here help?
     _X.set_value(np.ones((2, 2), dtype=dtype))
     _yvecs.set_value(np.ones(2, dtype=dtype))
     return rval
