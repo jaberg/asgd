@@ -661,3 +661,81 @@ def BinarySubsampledTheanoOVA(svm, data,
     _X.set_value(np.ones((2, 2), dtype=dtype))
     _yvecs.set_value(np.ones(2, dtype=dtype))
     return rval
+
+
+def binary_debug(svm, data,
+        l2_regularization=1e-3,
+        dtype='float64',
+        cost_fn='L2Huber',
+        bfgs_factr=1e11,  # 1e7 for moderate tolerance, 1e12 for low
+        bfgs_maxfun=1000,
+        decisions=None
+        ):
+    n_features, = svm.weights.shape
+    X, y = data
+
+    assert set(y) == set([-1, 1])
+    _X = theano.shared(X.astype(dtype), allow_downcast=True, borrow=True)
+    _yvecs = theano.shared(y.astype(dtype), allow_downcast=True, borrow=True)
+
+    sgd_params = tensor.vector(dtype=dtype)
+
+    sgd_weights = sgd_params[:n_features]
+    sgd_bias = sgd_params[n_features]
+
+    margin = _yvecs * (tensor.dot(_X, sgd_weights)
+            #+ sgd_bias
+            )
+
+    # XXX REFACTOR
+    if cost_fn == 'L2Half':
+        losses = tensor.maximum(0, 1 - margin) ** 2
+    elif cost_fn == 'L2Huber':
+        # "Huber-ized" L2-SVM
+        losses = tensor.switch(
+                margin > -1,
+                # -- smooth part
+                tensor.maximum(0, 1 - margin) ** 2,
+                # -- straight part
+                -4 * margin)
+    elif cost_fn == 'Hinge':
+        losses = tensor.maximum(0, 1 - margin)
+    else:
+        raise ValueError('invalid cost-fn', cost_fn)
+
+    l2_cost = .5 * l2_regularization * tensor.dot(
+            sgd_weights, sgd_weights)
+
+    cost = losses.mean() + l2_cost  + sgd_bias ** 2
+    dcost_dparams = tensor.grad(cost, sgd_params)
+
+    _f_df = theano.function([sgd_params], [cost, dcost_dparams])
+
+    def flatten_svm(obj):
+        # Note this is different from multi-class case because bias is scalar
+        return np.concatenate([obj.weights.flatten(), [obj.bias]])
+
+    def f(p):
+        c, d = _f_df(p.astype(dtype))
+        return c.astype('float64'), d.astype('float64')
+
+    params = np.zeros(n_features + 1)
+    params[:n_features] = svm.weights
+    params[n_features] = svm.bias
+
+    best, bestval, info_dct = fmin_l_bfgs_b(f,
+            params,
+            iprint=1,
+            factr=1e-5,
+            maxfun=bfgs_maxfun,
+            m=50,
+            pgtol=1e-5,
+            )
+    best_svm = copy.deepcopy(svm)
+    best_svm.weights = np.array(best[:n_features], dtype=dtype)
+    best_svm.bias = float(best[n_features])
+
+    # why ???
+    _X.set_value(np.ones((2, 2), dtype=dtype))
+    _yvecs.set_value(np.ones(2, dtype=dtype))
+    return best_svm
