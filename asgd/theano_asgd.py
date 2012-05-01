@@ -406,6 +406,8 @@ def SubsampledTheanoOVA(svm, data,
         cost_fn='L2Huber',
         bfgs_factr=1e11,  # 1e7 for moderate tolerance, 1e12 for low
         bfgs_maxfun=1000,
+        decisions=None,
+        decision_hack=None,
         ):
     # I tried to change the problem to work with reduced regularization
     # or a smaller minimal margin (e.g. < 1) to compensate for the missing
@@ -415,6 +417,9 @@ def SubsampledTheanoOVA(svm, data,
     # did in the eccv12 project (see e.g. MarginASGD)
     n_features, n_classes = svm.weights.shape
     X, y = data
+    if verbose:
+        print 'Training svm on design matrix of size', X.shape
+        print '   with', n_classes, 'features'
     if n_runs is None:
         sizeof_dtype = {'float32': 4, 'float64': 8}[dtype]
         Xbytes = X.size * sizeof_dtype
@@ -427,6 +432,19 @@ def SubsampledTheanoOVA(svm, data,
     _yvecs = theano.shared(np.ones((2, 2), dtype=dtype),
             allow_downcast=True)
 
+    if decisions is None:
+        _decisions = theano.shared(
+                np.zeros((len(y), n_classes), dtype=dtype),
+                allow_downcast=True)
+    else:
+        decisions = np.asarray(decisions).astype(dtype)
+        # -- N.B. for multi-class the decisions would be an examples x classes
+        # matrix
+        if decisions.shape != (len(y), n_classes):
+            raise ValueError('decisions have wrong shape', decisions.shape)
+        _decisions = theano.shared(decisions)
+        del decisions
+
     sgd_params = tensor.vector(dtype=dtype)
     s_n_use = tensor.lscalar()
 
@@ -434,7 +452,7 @@ def SubsampledTheanoOVA(svm, data,
     sgd_weights = flat_sgd_weights.reshape((s_n_use, n_classes))
     sgd_bias = sgd_params[s_n_use * n_classes:]
 
-    margin = _yvecs * (tensor.dot(_X, sgd_weights) + sgd_bias)
+    margin = _yvecs * (tensor.dot(_X, sgd_weights) + sgd_bias + _decisions)
 
     if cost_fn == 'L2Half':
         losses = tensor.maximum(0, 1 - margin) ** 2
@@ -462,6 +480,12 @@ def SubsampledTheanoOVA(svm, data,
     yvecs = np.asarray(
             (y[:, None] == np.arange(n_classes)) * 2 - 1,
             dtype=dtype)
+
+    _f_update_decisions = theano.function([sgd_params, s_n_use], [],
+            updates={
+                _decisions: (_decisions
+                    + tensor.dot(_X, sgd_weights) + sgd_bias),
+                })
 
     def flatten_svm(obj):
         return np.concatenate([obj.weights.flatten(), obj.bias])
@@ -501,6 +525,29 @@ def SubsampledTheanoOVA(svm, data,
                     (n_use, n_classes))
         best_svm.bias = best[n_classes * n_use:]
         bests.append(flatten_svm(best_svm))
+
+        _f_update_decisions(best.astype(dtype), n_use)
+        margin_ii = _decisions.get_value() * _yvecs.get_value()
+        print 'run %i: margin min:%f mean:%f max:%f' % (
+                ii, np.min(margin_ii), np.mean(margin_ii), np.max(margin_ii))
+        if decision_hack == 'min':
+            # XXX This is a hack that helps but it's basically wrong. The
+            # correct thing to do would be to add two scalars to the
+            # optimization: one scalar represents the total l2 norm of the
+            # weight vector fit so far.  The second scalar represents how much
+            # to down-weight the total vector fit so far in response to the
+            # utility of the current feature set.  So this second scalar would
+            # scale the vector of previous decisions, and the l2-cost would
+            # always be the l2-cost of the entire vector so far.
+            _decisions.set_value(
+                    _decisions.get_value()
+                    - max(0, np.min(margin_ii)) * _yvecs.get_value())
+        elif decision_hack == None:
+            if (ii < (n_runs - 1)) and (np.min(margin_ii) > .95):
+                print 'Margin has been maximized after', ii, 'of', n_runs
+                break
+        else:
+            raise ValueError('unrecognized decision_hack value', decision_hack)
 
     # sum instead of mean here, because each loop iter trains only a subset of
     # features. XXX: This assumes that those subsets are mutually exclusive
