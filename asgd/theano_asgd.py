@@ -481,11 +481,12 @@ def SubsampledTheanoOVA(svm, data,
             (y[:, None] == np.arange(n_classes)) * 2 - 1,
             dtype=dtype)
 
-    _f_update_decisions = theano.function([sgd_params, s_n_use], [],
-            updates={
-                _decisions: (_decisions
-                    + tensor.dot(_X, sgd_weights) + sgd_bias),
-                })
+    # TODO: reconsider how to use this function when doing partial fitting
+    #_f_update_decisions = theano.function([sgd_params, s_n_use], [],
+    #        updates={
+    #            _decisions: (_decisions
+    #                + tensor.dot(_X, sgd_weights) + sgd_bias),
+    #            })
 
     def flatten_svm(obj):
         return np.concatenate([obj.weights.flatten(), obj.bias])
@@ -525,29 +526,6 @@ def SubsampledTheanoOVA(svm, data,
                     (n_use, n_classes))
         best_svm.bias = best[n_classes * n_use:]
         bests.append(flatten_svm(best_svm))
-
-        _f_update_decisions(best.astype(dtype), n_use)
-        margin_ii = _decisions.get_value() * _yvecs.get_value()
-        print 'run %i: margin min:%f mean:%f max:%f' % (
-                ii, np.min(margin_ii), np.mean(margin_ii), np.max(margin_ii))
-        if decision_hack == 'min':
-            # XXX This is a hack that helps but it's basically wrong. The
-            # correct thing to do would be to add two scalars to the
-            # optimization: one scalar represents the total l2 norm of the
-            # weight vector fit so far.  The second scalar represents how much
-            # to down-weight the total vector fit so far in response to the
-            # utility of the current feature set.  So this second scalar would
-            # scale the vector of previous decisions, and the l2-cost would
-            # always be the l2-cost of the entire vector so far.
-            _decisions.set_value(
-                    _decisions.get_value()
-                    - max(0, np.min(margin_ii)) * _yvecs.get_value())
-        elif decision_hack == None:
-            if (ii < (n_runs - 1)) and (np.min(margin_ii) > .95):
-                print 'Margin has been maximized after', ii, 'of', n_runs
-                break
-        else:
-            raise ValueError('unrecognized decision_hack value', decision_hack)
 
     # sum instead of mean here, because each loop iter trains only a subset of
     # features. XXX: This assumes that those subsets are mutually exclusive
@@ -786,3 +764,29 @@ def binary_debug(svm, data,
     _X.set_value(np.ones((2, 2), dtype=dtype))
     _yvecs.set_value(np.ones(2, dtype=dtype))
     return best_svm
+
+
+if 0:
+        if decision_hack == 'min':
+            _f_update_decisions(best.astype(dtype), n_use)
+            margin_ii = _decisions.get_value() * _yvecs.get_value()
+            print 'run %i: margin min:%f mean:%f max:%f' % (
+                    ii, np.min(margin_ii), np.mean(margin_ii), np.max(margin_ii))
+            # XXX This is a hack that helps but it's basically wrong. The
+            # correct thing to do would be to add two scalars to the
+            # optimization: one scalar represents the total l2 norm of the
+            # weight vector fit so far.  The second scalar represents how much
+            # to down-weight the total vector fit so far in response to the
+            # utility of the current feature set.  So this second scalar would
+            # scale the vector of previous decisions, and the l2-cost would
+            # always be the l2-cost of the entire vector so far.
+            _decisions.set_value(
+                    _decisions.get_value()
+                    - max(0, np.min(margin_ii)) * _yvecs.get_value())
+        elif decision_hack == None:
+            if (ii < (n_runs - 1)) and (np.min(margin_ii) > .95):
+                print 'Margin has been maximized after', ii, 'of', n_runs
+                break
+        else:
+            raise ValueError('unrecognized decision_hack value', decision_hack)
+
