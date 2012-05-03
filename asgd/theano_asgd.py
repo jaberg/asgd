@@ -403,6 +403,7 @@ def SubsampledTheanoOVA(svm, data,
         verbose=False,
         rng=None,
         n_runs=None,  # None -> smallest int that uses all data
+        n_keep=None,  # None -> X.shape[1] / n_runs
         cost_fn='L2Huber',
         bfgs_factr=1e11,  # 1e7 for moderate tolerance, 1e12 for low
         bfgs_maxfun=1000,
@@ -420,12 +421,16 @@ def SubsampledTheanoOVA(svm, data,
     if verbose:
         print 'Training svm on design matrix of size', X.shape
         print '   with', n_classes, 'features'
-    if n_runs is None:
-        sizeof_dtype = {'float32': 4, 'float64': 8}[dtype]
-        Xbytes = X.size * sizeof_dtype
-        keep_ratio = float(feature_bytes) / Xbytes
-        n_runs = int(np.ceil(1. / keep_ratio))
-    n_keep = int(np.ceil(X.shape[1] / float(n_runs)))
+    if n_keep is None:
+        if n_runs is None:
+            sizeof_dtype = {'float32': 4, 'float64': 8}[dtype]
+            Xbytes = X.size * sizeof_dtype
+            keep_ratio = float(feature_bytes) / Xbytes
+            n_runs = int(np.ceil(1. / keep_ratio))
+        n_keep = int(np.ceil(X.shape[1] / float(n_runs)))
+    else:
+        if n_runs is None:
+            n_runs = int(np.ceil(X.shape[1] / float(n_keep)))
 
     _X = theano.shared(np.ones((2, 2), dtype=dtype),
             allow_downcast=True)
@@ -534,6 +539,12 @@ def SubsampledTheanoOVA(svm, data,
     rval.weights = best_params[:n_classes * n_features].reshape(
                 (n_features, n_classes))
     rval.bias = best_params[n_classes * n_features:]
+
+    # XXX: figure out why Theano may be not freeing this memory, why does
+    # writing little matrices here help?
+    _X.set_value(np.ones((2, 2), dtype=dtype))
+    _yvecs.set_value(np.ones((2, 2), dtype=dtype))
+    _decisions.set_value(np.ones((2, 2), dtype=dtype))
     return rval
 
 
